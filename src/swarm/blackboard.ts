@@ -9,6 +9,8 @@ import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import * as os from 'node:os';
+import { isSystemDir, isWritableDir } from '../config/index.js';
 import type {
   AcceptanceCriterion,
   AgentActivityStatus,
@@ -34,17 +36,63 @@ export class Blackboard extends EventEmitter {
   private stateDir: string;
   private autoSave: boolean;
   private state: BlackboardState;
+  private isInMemory: boolean = false;
   private saveLock: Promise<void> = Promise.resolve();
 
   constructor(options: BlackboardOptions = {}) {
     super();
     const root = options.workspaceRoot || process.cwd();
-    this.stateDir = options.stateDir || path.join(root, '.nomin', 'state');
+
+    // Respect options.stateDir if explicitly supplied
+    if (options.stateDir) {
+      this.stateDir = options.stateDir;
+    } else {
+      const isSys = isSystemDir(root);
+      const isWritable = isWritableDir(root);
+      this.stateDir = (isSys || !isWritable)
+        ? path.join(os.homedir(), '.nomin', 'fallback-state')
+        : path.join(root, '.nomin', 'state');
+    }
+
     this.stateFilePath = path.join(this.stateDir, 'blackboard.json');
     this.autoSave = options.autoSave ?? true;
 
     const initialSessionId = options.sessionId || crypto.randomUUID();
     this.state = this.loadOrCreateState(initialSessionId);
+  }
+
+  /**
+   * Returns the current state directory being used for persistence.
+   */
+  public getStateDir(): string {
+    return this.stateDir;
+  }
+
+  /**
+   * Returns true if blackboard is running in-memory (e.g., when disk is entirely inaccessible).
+   */
+  public isInMemoryMode(): boolean {
+    return this.isInMemory;
+  }
+
+  /**
+   * Switches the active workspace and re-points blackboard persistence to the new location.
+   */
+  public switchWorkspace(newWorkspaceRoot: string): void {
+    const isSys = isSystemDir(newWorkspaceRoot);
+    const isWritable = isWritableDir(newWorkspaceRoot);
+    this.stateDir = (isSys || !isWritable)
+      ? path.join(os.homedir(), '.nomin', 'fallback-state')
+      : path.join(newWorkspaceRoot, '.nomin', 'state');
+    this.stateFilePath = path.join(this.stateDir, 'blackboard.json');
+
+    if (!fs.existsSync(this.stateDir)) {
+      try {
+        fs.mkdirSync(this.stateDir, { recursive: true });
+      } catch (_) {}
+    }
+
+    this.state = this.loadOrCreateState(this.state.sessionId);
   }
 
   /**
@@ -111,31 +159,77 @@ export class Blackboard extends EventEmitter {
   // ---------------------------------------------------------------------------
 
   /**
+   * Writes the blackboard state atomically to the specified directory and file.
+   */
+  private writeStateAtomic(dir: string, filePath: string, stateToSave: BlackboardState): void {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const serialized = JSON.stringify(stateToSave, null, 2);
+    const tempPath = `${filePath}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+
+    fs.writeFileSync(tempPath, serialized, 'utf-8');
+
+    // On Windows, rename fails if destination exists in some versions, so unlink if present
+    if (process.platform === 'win32' && fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // ignore unlink error, let rename attempt override
+      }
+    }
+    fs.renameSync(tempPath, filePath);
+  }
+
+  /**
    * Synchronously saves the blackboard state atomically to disk.
+   * Catches EPERM/EACCES errors and gracefully falls back to ~/.nomin/fallback-state or in-memory state.
    */
   private saveStateSync(stateToSave: BlackboardState): void {
-    try {
-      if (!fs.existsSync(this.stateDir)) {
-        fs.mkdirSync(this.stateDir, { recursive: true });
-      }
+    if (this.isInMemory) {
+      this.emit('blackboard:saved', stateToSave);
+      return;
+    }
 
-      const serialized = JSON.stringify(stateToSave, null, 2);
-      const tempPath = `${this.stateFilePath}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`;
-      
-      fs.writeFileSync(tempPath, serialized, 'utf-8');
-      
-      // On Windows, rename fails if destination exists in some versions, so unlink if present
-      if (process.platform === 'win32' && fs.existsSync(this.stateFilePath)) {
+    try {
+      this.writeStateAtomic(this.stateDir, this.stateFilePath, stateToSave);
+      this.emit('blackboard:saved', stateToSave);
+      return;
+    } catch (err) {
+      // Disk write or mkdir failed (EPERM, EACCES, read-only filesystem, etc.)
+      const fallbackDir = path.join(os.homedir(), '.nomin', 'fallback-state');
+
+      // Attempt 1: ~/.nomin/fallback-state
+      if (this.stateDir !== fallbackDir) {
         try {
-          fs.unlinkSync(this.stateFilePath);
+          this.stateDir = fallbackDir;
+          this.stateFilePath = path.join(this.stateDir, 'blackboard.json');
+          this.writeStateAtomic(this.stateDir, this.stateFilePath, stateToSave);
+          this.emit('blackboard:saved', stateToSave);
+          return;
         } catch {
-          // ignore unlink error, let rename attempt override
+          // Continue to temporary directory fallback
         }
       }
-      fs.renameSync(tempPath, this.stateFilePath);
+
+      // Attempt 2: os.tmpdir()/.nomin/fallback-state
+      const tmpFallbackDir = path.join(os.tmpdir(), '.nomin', 'fallback-state');
+      if (this.stateDir !== tmpFallbackDir) {
+        try {
+          this.stateDir = tmpFallbackDir;
+          this.stateFilePath = path.join(this.stateDir, 'blackboard.json');
+          this.writeStateAtomic(this.stateDir, this.stateFilePath, stateToSave);
+          this.emit('blackboard:saved', stateToSave);
+          return;
+        } catch {
+          // Continue to in-memory fallback
+        }
+      }
+
+      // Attempt 3: In-memory fallback (prevent application crash)
+      this.isInMemory = true;
       this.emit('blackboard:saved', stateToSave);
-    } catch (err) {
-      this.emit('error', new Error(`Failed to save blackboard state: ${(err as Error).message}`));
     }
   }
 

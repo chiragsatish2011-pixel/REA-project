@@ -6,6 +6,7 @@
 
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isSystemDirectory } from '../config/index.js';
 
 export const ANSI = {
   reset: '\x1b[0m',
@@ -86,6 +87,33 @@ export class TerminalUI {
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Models:${ANSI.reset}     Architect: ${ANSI.brightCyan}${telemetry.architectModel}${ANSI.reset} | Coder: ${ANSI.brightGreen}${telemetry.coderModel}${ANSI.reset}`);
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Gateways:${ANSI.reset}   ${ANSI.green}[DoD Evidence Gate]${ANSI.reset} ${ANSI.yellow}[Grok TodoGate]${ANSI.reset} ${ANSI.blue}[PageRank RepoMap]${ANSI.reset}`);
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Limits:${ANSI.reset}     ${telemetry.rpmLimit} RPM · ${telemetry.tpmLimit.toLocaleString()} TPM · Concurrency Cap: ${telemetry.concurrency}`);
+    if (isSystemDirectory(telemetry.workdir)) {
+      console.log(`  ${ANSI.gray}│${ANSI.reset}`);
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.brightYellow}⚠️ Running in system directory. Workspace state sandboxed to ~/.nomin.${ANSI.reset}`);
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.brightCyan}💡 Tip: Use 'cd <path>' or start with 'nomin <path>' to work on a project.${ANSI.reset}`);
+    }
+    console.log(`  ${ANSI.gray}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+    console.log();
+  }
+
+  /**
+   * Renders a system directory sandboxing tip warning.
+   */
+  public static renderSystemDirWarning(): void {
+    console.log(`  ${ANSI.brightYellow}⚠️ Running in system directory. Workspace state sandboxed to ~/.nomin.${ANSI.reset}`);
+    console.log(`  ${ANSI.brightCyan}💡 Tip: Use 'cd <path>' or start with 'nomin <path>' to work on a project.${ANSI.reset}\n`);
+  }
+
+  /**
+   * Renders the dynamic directory switch card.
+   */
+  public static renderWorkspaceSwitchedCard(workdir: string, gitBranch: string): void {
+    const w = TerminalUI.width();
+    const border = '─'.repeat(Math.max(0, w - 26));
+    console.log();
+    console.log(`  ${ANSI.gray}╭─ [WORKSPACE SWITCHED] ${border}╮${ANSI.reset}`);
+    console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● New Working Directory:${ANSI.reset} ${workdir}`);
+    console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Active Branch:${ANSI.reset}          ${gitBranch}`);
     console.log(`  ${ANSI.gray}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
@@ -104,8 +132,8 @@ export class TerminalUI {
    */
   public static renderMessageBarFooter(): void {
     const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 54));
-    console.log(`  ${ANSI.gray}╰─ ${ANSI.dim}[Ctrl+C Exit] [/status] [/repomap] [/models] [/config]${ANSI.gray} ${border}╯${ANSI.reset}`);
+    const border = '─'.repeat(Math.max(0, w - 60));
+    console.log(`  ${ANSI.gray}╰─ ${ANSI.dim}[Ctrl+C Exit] [/cd] [/status] [/repomap] [/models] [/config]${ANSI.gray} ${border}╯${ANSI.reset}`);
     console.log();
   }
 

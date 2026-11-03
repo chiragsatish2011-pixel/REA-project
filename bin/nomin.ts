@@ -7,12 +7,14 @@
 
 import * as process from 'node:process';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ConfigManager } from '../src/config/index.js';
 import { SwarmCoordinator } from '../src/swarm/coordinator.js';
 import { ReplServer } from '../src/cli/repl.js';
 import { UI, ANSI } from '../src/cli/ui.js';
 
-interface CliArgs {
+export interface CliArgs {
   model?: string;
   provider?: string;
   apiKey?: string;
@@ -24,7 +26,7 @@ interface CliArgs {
   version: boolean;
 }
 
-function parseArgs(args: string[]): CliArgs {
+export function parseArgs(args: string[]): CliArgs {
   const parsed: CliArgs = {
     headless: false,
     help: false,
@@ -52,9 +54,23 @@ function parseArgs(args: string[]): CliArgs {
       parsed.task = args[++i];
     } else if (arg === '--concurrency' && i + 1 < args.length) {
       parsed.concurrency = parseInt(args[++i], 10);
-    } else if (!arg.startsWith('-') && !parsed.task) {
-      // Positional task argument
-      parsed.task = arg;
+    } else if (!arg.startsWith('-')) {
+      // Check if arg is an existing directory path on disk (e.g. nomin ., nomin C:\..., nomin /var/www, nomin ..)
+      let isDir = false;
+      try {
+        const resolved = path.resolve(arg);
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+          isDir = true;
+        }
+      } catch (_) {
+        isDir = false;
+      }
+
+      if (isDir && !parsed.workdir) {
+        parsed.workdir = path.resolve(arg);
+      } else if (!parsed.task) {
+        parsed.task = arg;
+      }
     }
   }
 
@@ -66,9 +82,15 @@ function printUsage(): void {
 ${ANSI.bold}Nomin Code — Autonomous Multi-Agent AI Coding Harness${ANSI.reset}
 
 ${ANSI.bold}USAGE:${ANSI.reset}
-  nomin [OPTIONS]
+  nomin [OPTIONS] [path] [task]
+  nomin .
+  nomin ./project "Implement feature X"
+  nomin "Implement feature X"
   nomin --task "Implement feature X" --headless
-  nomin [OPTIONS] "Implement feature X"
+
+${ANSI.bold}ARGUMENTS:${ANSI.reset}
+  ${ANSI.cyan}[path]${ANSI.reset}                         Working directory path (e.g. '.', '..', 'C:\\path', '/var/www')
+  ${ANSI.cyan}[task]${ANSI.reset}                         Initial prompt / objective to execute
 
 ${ANSI.bold}OPTIONS:${ANSI.reset}
   ${ANSI.cyan}--task <string>${ANSI.reset}         The prompt / goal to execute
@@ -88,7 +110,7 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.version) {
-    console.log('nomin-code v1.0.0');
+    console.log('@nomincode/cli v1.0.0');
     process.exit(0);
   }
 
@@ -125,9 +147,18 @@ async function main(): Promise<void> {
     });
   }
 
+  const cfg = configManager.getConfig();
+
+  if (cfg.isFallbackState) {
+    UI.logAgent('SYSTEM', `${ANSI.yellow}Notice: Running in ${cfg.isSystemDir ? 'system-protected' : 'read-only'} directory.${ANSI.reset}`);
+    UI.logAgent('SYSTEM', `${ANSI.yellow}State safely redirected to: ${cfg.stateDir}${ANSI.reset}`);
+  }
+
   const coordinator = new SwarmCoordinator({
     workspaceRoot: workdir,
-    useGitWorktrees: configManager.getConfig().enableWorktreeIsolation,
+    stateDir: cfg.stateDir,
+    worktreeDir: cfg.worktreeDir,
+    useGitWorktrees: cfg.enableWorktreeIsolation,
   });
 
   // Headless mode or batch task execution
@@ -164,7 +195,16 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(`${ANSI.red}Fatal error: ${err.message}${ANSI.reset}`);
-  process.exit(1);
-});
+const isDirectExecution = !!process.argv[1] && (
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url) ||
+  process.argv[1].endsWith('nomin.js') ||
+  process.argv[1].endsWith('nomin.ts') ||
+  process.argv[1].endsWith('nomin')
+) && !process.env.NODE_TEST_CONTEXT;
+
+if (isDirectExecution) {
+  main().catch((err) => {
+    console.error(`${ANSI.red}Fatal error: ${err.message}${ANSI.reset}`);
+    process.exit(1);
+  });
+}

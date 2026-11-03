@@ -1,5 +1,5 @@
 {
-  "name": "nomin-code",
+  "name": "@nomincode/cli",
   "version": "1.0.0",
   "description": "Production-grade, model-agnostic AI coding harness and multi-agent swarm runtime",
   "type": "module",

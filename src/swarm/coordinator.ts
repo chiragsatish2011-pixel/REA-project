@@ -13,6 +13,7 @@ import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -40,6 +41,8 @@ export interface SwarmCoordinatorOptions {
   coderModel?: string;
   testerModel?: string;
   verifierModel?: string;
+  stateDir?: string;
+  worktreeDir?: string;
 }
 
 export interface TaskExecutionHookContext {
@@ -92,10 +95,11 @@ export class SwarmCoordinator extends EventEmitter {
     this.maxRetriesPerTask = options.maxRetriesPerTask ?? 3;
     this.useGitWorktrees = options.useGitWorktrees ?? true;
 
-    this.worktreesBaseDir = path.join(this.workspaceRoot, '.nomin', 'worktrees');
+    this.worktreesBaseDir = options.worktreeDir || path.join(this.workspaceRoot, '.nomin', 'worktrees');
 
     this.blackboard = new Blackboard({
       workspaceRoot: this.workspaceRoot,
+      stateDir: options.stateDir,
       sessionId: this.sessionId,
     });
 
@@ -111,6 +115,22 @@ export class SwarmCoordinator extends EventEmitter {
       testerModel: options.testerModel || 'qwen/qwen2.5-coder-32b-instruct',
       verifierModel: options.verifierModel || 'deepseek-ai/deepseek-r1',
     });
+  }
+
+  /**
+   * Dynamically switches the active workspace root and updates internal paths & blackboard.
+   */
+  public switchWorkspace(newWorkdir: string): void {
+    this.workspaceRoot = path.resolve(newWorkdir);
+    this.worktreesBaseDir = path.join(this.workspaceRoot, '.nomin', 'worktrees');
+    this.blackboard.switchWorkspace(this.workspaceRoot);
+  }
+
+  /**
+   * Returns current workspace root directory.
+   */
+  public getWorkspaceRoot(): string {
+    return this.workspaceRoot;
   }
 
   /**
@@ -468,7 +488,17 @@ export class SwarmCoordinator extends EventEmitter {
     const wtDir = path.join(this.worktreesBaseDir, `wt-${taskId}-${role}`);
 
     if (!fs.existsSync(this.worktreesBaseDir)) {
-      fs.mkdirSync(this.worktreesBaseDir, { recursive: true });
+      try {
+        fs.mkdirSync(this.worktreesBaseDir, { recursive: true });
+      } catch {
+        const fallbackBase = path.join(os.homedir(), '.nomin', 'fallback-worktrees');
+        if (!fs.existsSync(fallbackBase)) {
+          try {
+            fs.mkdirSync(fallbackBase, { recursive: true });
+          } catch (_) {}
+        }
+        this.worktreesBaseDir = fallbackBase;
+      }
     }
 
     if (this.useGitWorktrees) {

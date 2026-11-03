@@ -4,9 +4,12 @@
  */
 
 import * as readline from 'node:readline';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { ANSI, TerminalUI } from './ui.js';
 import { SwarmCoordinator } from '../swarm/coordinator.js';
-import { ConfigManager, type NominConfig } from '../config/index.js';
+import { ConfigManager, isSystemDirectory, type NominConfig } from '../config/index.js';
 import { RepoMapEngine } from '../tools/repomap.js';
 import { BashTool } from '../tools/bash.js';
 
@@ -70,6 +73,11 @@ export class NominREPL {
       concurrency: activeProv.defaultConcurrency,
     });
 
+    if (cfg.isFallbackState) {
+      console.log(`  ${ANSI.yellow}⚠ Notice: Running in ${cfg.isSystemDir ? 'system-protected' : 'read-only'} directory.${ANSI.reset}`);
+      console.log(`  ${ANSI.yellow}  State & worktrees redirected to: ${ANSI.dim}${cfg.stateDir}${ANSI.reset}\n`);
+    }
+
     this.initReadline();
   }
 
@@ -86,33 +94,52 @@ export class NominREPL {
     });
 
     this.promptTurn();
+    let isHandlingLine = false;
 
     this.rl.on('line', async (line: string) => {
+      isHandlingLine = true;
       const input = line.trim();
       TerminalUI.renderMessageBarFooter();
 
       if (!input) {
+        isHandlingLine = false;
         this.promptTurn();
         return;
       }
 
-      if (input.startsWith('/')) {
-        await this.handleSlashCommand(input);
-        this.promptTurn();
-        return;
-      }
+      // Pause readline stream during async action processing
+      this.rl?.pause();
 
-      if (this.isProcessing) {
-        console.log(`  ${ANSI.yellow}⚠️ An active swarm task is currently in progress. Please wait...${ANSI.reset}\n`);
-        this.promptTurn();
-        return;
-      }
+      try {
+        // Handle cd <path> or /cd <path>
+        if (input === 'cd' || input.startsWith('cd ') || input === '/cd' || input.startsWith('/cd ')) {
+          const rawPath = input.startsWith('/cd') ? input.slice(3).trim() : input.slice(2).trim();
+          await this.handleDirectorySwitch(rawPath);
+          return;
+        }
 
-      await this.executeUserTask(input);
-      this.promptTurn();
+        if (input.startsWith('/')) {
+          await this.handleSlashCommand(input);
+          return;
+        }
+
+        if (this.isProcessing) {
+          console.log(`  ${ANSI.yellow}⚠️ An active swarm task is currently in progress. Please wait...${ANSI.reset}\n`);
+          return;
+        }
+
+        await this.executeUserTask(input);
+      } finally {
+        isHandlingLine = false;
+        this.rl?.resume();
+        this.promptTurn();
+      }
     });
 
-    this.rl.on('close', () => {
+    this.rl.on('close', async () => {
+      while (isHandlingLine) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
       console.log(`\n  ${ANSI.gray}Goodbye from Nomin Code.${ANSI.reset}\n`);
       process.exit(0);
     });
@@ -177,6 +204,81 @@ export class NominREPL {
     }
   }
 
+  /**
+   * Dynamically switches the active working directory, synchronizes config & coordinator,
+   * checks system directory warnings, and renders the switch status card.
+   */
+  public async handleDirectorySwitch(rawPath: string): Promise<void> {
+    const cfg = this.configManager.getConfig();
+    let newPath = (rawPath || '').trim();
+
+    // Strip wrapping quotes
+    if ((newPath.startsWith('"') && newPath.endsWith('"')) || (newPath.startsWith("'") && newPath.endsWith("'"))) {
+      newPath = newPath.slice(1, -1).trim();
+    }
+
+    // Resolve target path (handling ~ or empty)
+    let target: string;
+    if (!newPath) {
+      target = os.homedir();
+    } else if (newPath === '~' || newPath.startsWith('~/') || newPath.startsWith('~\\')) {
+      target = path.resolve(os.homedir(), newPath.slice(1).replace(/^[\\\/]/, ''));
+    } else {
+      target = path.resolve(cfg.workdir, newPath);
+    }
+
+    // Verify existence and directory status
+    let isDir = false;
+    try {
+      if (fs.existsSync(target) && fs.statSync(target).isDirectory()) {
+        isDir = true;
+      }
+    } catch (_) {
+      isDir = false;
+    }
+
+    if (!isDir) {
+      console.log(`\n  ${ANSI.brightRed}✖ Directory not found or not accessible: ${target}${ANSI.reset}\n`);
+      return;
+    }
+
+    // Update config
+    cfg.workdir = target;
+    this.configManager.updateConfig({ workdir: target });
+
+    // Update process current working directory
+    try {
+      process.chdir(target);
+    } catch (_) {}
+
+    // Re-query Git branch for new target directory
+    let gitBranch = 'main';
+    try {
+      const gitRes = await BashTool.execute('git branch --show-current', { cwd: target });
+      if (gitRes.exitCode === 0 && gitRes.stdout.trim()) {
+        gitBranch = gitRes.stdout.trim();
+      } else {
+        const revRes = await BashTool.execute('git rev-parse --abbrev-ref HEAD', { cwd: target });
+        if (revRes.exitCode === 0 && revRes.stdout.trim()) {
+          gitBranch = revRes.stdout.trim();
+        }
+      }
+    } catch (_) {
+      // Non-git fallback
+    }
+
+    // Update coordinator's workspace
+    this.coordinator.switchWorkspace(target);
+
+    // Render sleek TerminalUI card
+    TerminalUI.renderWorkspaceSwitchedCard(target, gitBranch);
+
+    // System directory warning if applicable
+    if (isSystemDirectory(target)) {
+      TerminalUI.renderSystemDirWarning();
+    }
+  }
+
   private async handleSlashCommand(cmdStr: string): Promise<void> {
     const [cmd] = cmdStr.split(' ');
 
@@ -185,6 +287,7 @@ export class NominREPL {
         console.log(`
   ${ANSI.bold}Nomin Code Slash Commands:${ANSI.reset}
     ${ANSI.cyan}/help${ANSI.reset}         Show this catalog of commands
+    ${ANSI.cyan}/cd <path>${ANSI.reset}    Switch active working directory and git context
     ${ANSI.cyan}/status${ANSI.reset}       Display active Blackboard DAG and agent worktree status
     ${ANSI.cyan}/repomap${ANSI.reset}      Generate and view PageRank-ranked repository symbol outline
     ${ANSI.cyan}/models${ANSI.reset}       Display current role-to-model configuration
@@ -193,6 +296,13 @@ export class NominREPL {
     ${ANSI.cyan}/exit${ANSI.reset}         Exit Nomin Code REPL
         `);
         break;
+
+      case '/cd': {
+        const parts = cmdStr.split(' ');
+        const rawPath = parts.slice(1).join(' ').trim();
+        await this.handleDirectorySwitch(rawPath);
+        break;
+      }
 
       case '/status': {
         const state = this.coordinator.blackboard.getState();
@@ -211,8 +321,9 @@ export class NominREPL {
       }
 
       case '/repomap': {
-        console.log(`\n  ${ANSI.dim}Generating PageRank repository map...${ANSI.reset}\n`);
-        const result = RepoMapEngine.generate({ repoPath: process.cwd(), maxTokens: 1024 });
+        const activeWorkdir = this.configManager.getConfig().workdir;
+        console.log(`\n  ${ANSI.dim}Generating PageRank repository map for ${activeWorkdir}...${ANSI.reset}\n`);
+        const result = RepoMapEngine.generate({ repoPath: activeWorkdir, maxTokens: 1024 });
         console.log(result.mapText);
         console.log();
         break;

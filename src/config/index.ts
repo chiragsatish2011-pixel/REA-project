@@ -1,11 +1,13 @@
 /**
  * Nomin Code: Configuration Manager & Environment Loader
  * Supports NVIDIA NIM, OpenAI, Anthropic, DeepSeek, and local Ollama/vLLM endpoints.
+ * State & Filesystem Resilience Architecture.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as crypto from 'node:crypto';
 
 export interface RoleModelConfig {
   architect: string;
@@ -36,9 +38,301 @@ export interface NominConfig {
   enableTodoGate: boolean;
   enableWorktreeIsolation: boolean;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
+  isSystemDir?: boolean;
+  isFallbackState?: boolean;
+  globalConfigDir?: string;
 }
 
 const DEFAULT_NIM_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+
+/**
+ * Checks whether a given directory (or its closest ancestor if non-existent) is writable.
+ */
+export function isWritableDir(dir: string): boolean {
+  try {
+    let target = path.resolve(dir);
+
+    // If dir does not exist, navigate upwards to find nearest existing directory
+    while (!fs.existsSync(target)) {
+      const parent = path.dirname(target);
+      if (parent === target) break; // Reached filesystem root
+      target = parent;
+    }
+
+    if (!fs.existsSync(target)) {
+      return false;
+    }
+
+    const stat = fs.statSync(target);
+    if (!stat.isDirectory()) {
+      return false;
+    }
+
+    // Fast check via accessSync
+    try {
+      fs.accessSync(target, fs.constants.W_OK | fs.constants.R_OK);
+    } catch {
+      return false;
+    }
+
+    // Concrete test write to guarantee filesystem write permissions (handles Windows ACL quirks)
+    const probeFile = path.join(
+      target,
+      `.nomin_write_test_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2)}`
+    );
+    try {
+      fs.writeFileSync(probeFile, 'test', 'utf8');
+      fs.unlinkSync(probeFile);
+      return true;
+    } catch {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks whether a directory is a system-protected path.
+ * Windows: SystemRoot (C:\Windows), System32, Program Files, ProgramData, drive roots.
+ * POSIX: /, /bin, /sbin, /usr, /etc, /var, /lib, /lib64, /opt, /sys, /proc, /dev, /boot, /root.
+ */
+export function isSystemDir(dir: string): boolean {
+  try {
+    const raw = dir.trim();
+    const resolved = path.resolve(dir);
+
+    if (process.platform === 'win32') {
+      // Direct drive root check (e.g., "C:", "C:\", "D:")
+      if (/^[a-zA-Z]:\\?$/.test(raw)) {
+        return true;
+      }
+
+      const normalized = path.normalize(resolved).toLowerCase();
+
+      const envKeys = [
+        'SystemRoot',
+        'windir',
+        'ProgramFiles',
+        'ProgramFiles(x86)',
+        'ProgramW6432',
+        'ProgramData',
+        'CommonProgramFiles',
+        'CommonProgramFiles(x86)',
+      ];
+
+      const sysDirs: string[] = [];
+      for (const k of envKeys) {
+        const val = process.env[k];
+        if (val) sysDirs.push(val);
+      }
+
+      // Hardcoded standard Windows system roots
+      sysDirs.push(
+        'c:\\windows',
+        'c:\\program files',
+        'c:\\program files (x86)',
+        'c:\\programdata'
+      );
+
+      for (const s of sysDirs) {
+        const normS = path.normalize(s).toLowerCase();
+        if (normalized === normS || normalized.startsWith(normS + path.sep)) {
+          return true;
+        }
+      }
+
+      // Root of any drive on Windows (e.g., C:\, D:\) where creating project folders is restricted
+      const parsed = path.parse(resolved);
+      const normRoot = path.normalize(parsed.root).toLowerCase();
+      if (normalized === normRoot || normalized === normRoot.replace(/\\$/, '')) {
+        return true;
+      }
+    } else {
+      // POSIX root and protected system prefixes
+      if (resolved === '/') {
+        return true;
+      }
+
+      const protectedPrefixes = [
+        '/bin',
+        '/sbin',
+        '/usr',
+        '/etc',
+        '/var',
+        '/lib',
+        '/lib64',
+        '/opt',
+        '/sys',
+        '/proc',
+        '/dev',
+        '/boot',
+        '/root',
+      ];
+
+      for (const p of protectedPrefixes) {
+        if (resolved === p || resolved.startsWith(p + '/')) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export const isSystemDirectory = isSystemDir;
+
+/**
+ * Computes a safe, deterministic slug and hash for a workspace path.
+ */
+export function hashOrSlug(inputPath: string): string {
+  const resolved = path.resolve(inputPath);
+  const normalized = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  const basename = path.basename(resolved) || 'root';
+  const cleanBase = basename.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const hash = crypto.createHash('sha256').update(normalized).digest('hex').substring(0, 10);
+  return `${cleanBase}_${hash}`;
+}
+
+/**
+ * Safely creates a directory with multi-tier fallback: target -> fallbackDir -> os.homedir()/.nomin -> os.tmpdir()/.nomin.
+ */
+export function safeMkdirSync(targetDir: string, fallbackDir?: string): string {
+  try {
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    if (isWritableDir(targetDir)) {
+      return targetDir;
+    }
+  } catch {
+    // Continue to fallbacks
+  }
+
+  if (fallbackDir) {
+    try {
+      if (!fs.existsSync(fallbackDir)) {
+        fs.mkdirSync(fallbackDir, { recursive: true });
+      }
+      if (isWritableDir(fallbackDir)) {
+        return fallbackDir;
+      }
+    } catch {
+      // Continue to next fallback
+    }
+  }
+
+  // Fallback to ~/.nomin
+  try {
+    const homeNomin = path.join(os.homedir(), '.nomin');
+    if (!fs.existsSync(homeNomin)) {
+      fs.mkdirSync(homeNomin, { recursive: true });
+    }
+    if (isWritableDir(homeNomin)) {
+      return homeNomin;
+    }
+  } catch {
+    // Continue to tmp fallback
+  }
+
+  // Fallback to tmpdir/.nomin
+  try {
+    const tmpNomin = path.join(os.tmpdir(), '.nomin');
+    if (!fs.existsSync(tmpNomin)) {
+      fs.mkdirSync(tmpNomin, { recursive: true });
+    }
+    return tmpNomin;
+  } catch {
+    return os.tmpdir();
+  }
+}
+
+export interface ResolvedNominPaths {
+  stateDir: string;
+  worktreeDir: string;
+  globalConfigDir: string;
+  isSystemDir: boolean;
+  isFallbackState: boolean;
+}
+
+/**
+ * Resolves bulletproof paths for Nomin state and worktrees.
+ */
+export function resolveNominPaths(workdir: string): ResolvedNominPaths {
+  const isSys = isSystemDir(workdir);
+  const isWritable = isWritableDir(workdir);
+
+  const globalConfigDir = path.join(os.homedir(), '.nomin');
+  safeMkdirSync(globalConfigDir);
+
+  // If workdir is writable and NOT a system directory, keep metadata inside workdir/.nomin
+  if (!isSys && isWritable) {
+    const candidateNominDir = path.join(workdir, '.nomin');
+    const candidateStateDir = path.join(candidateNominDir, 'state');
+    const candidateWorktreeDir = path.join(candidateNominDir, 'worktrees');
+
+    try {
+      if (!fs.existsSync(candidateStateDir)) {
+        fs.mkdirSync(candidateStateDir, { recursive: true });
+      }
+      if (!fs.existsSync(candidateWorktreeDir)) {
+        fs.mkdirSync(candidateWorktreeDir, { recursive: true });
+      }
+
+      return {
+        stateDir: candidateStateDir,
+        worktreeDir: candidateWorktreeDir,
+        globalConfigDir,
+        isSystemDir: false,
+        isFallbackState: false,
+      };
+    } catch {
+      // If mkdir throws EPERM or any filesystem error, seamlessly fall through to global workspace fallback
+    }
+  }
+
+  // Fallback path: store in ~/.nomin/workspaces/<hashOrSlug>
+  const slug = hashOrSlug(workdir);
+  const fallbackWorkspaceBase = path.join(globalConfigDir, 'workspaces', slug);
+  const fallbackStateDir = path.join(fallbackWorkspaceBase, 'state');
+  const fallbackWorktreeDir = path.join(fallbackWorkspaceBase, 'worktrees');
+
+  try {
+    if (!fs.existsSync(fallbackStateDir)) {
+      fs.mkdirSync(fallbackStateDir, { recursive: true });
+    }
+    if (!fs.existsSync(fallbackWorktreeDir)) {
+      fs.mkdirSync(fallbackWorktreeDir, { recursive: true });
+    }
+
+    return {
+      stateDir: fallbackStateDir,
+      worktreeDir: fallbackWorktreeDir,
+      globalConfigDir,
+      isSystemDir: isSys,
+      isFallbackState: true,
+    };
+  } catch {
+    // If ~/.nomin is also restricted, fallback to os.tmpdir()/.nomin/workspaces/<slug>
+    const tmpWorkspaceBase = path.join(os.tmpdir(), '.nomin', 'workspaces', slug);
+    const tmpStateDir = path.join(tmpWorkspaceBase, 'state');
+    const tmpWorktreeDir = path.join(tmpWorkspaceBase, 'worktrees');
+
+    safeMkdirSync(tmpStateDir);
+    safeMkdirSync(tmpWorktreeDir);
+
+    return {
+      stateDir: tmpStateDir,
+      worktreeDir: tmpWorktreeDir,
+      globalConfigDir: path.join(os.tmpdir(), '.nomin'),
+      isSystemDir: isSys,
+      isFallbackState: true,
+    };
+  }
+}
 
 export class ConfigManager {
   private static instance: ConfigManager;
@@ -51,8 +345,14 @@ export class ConfigManager {
   public static getInstance(workdir?: string): ConfigManager {
     if (!ConfigManager.instance) {
       ConfigManager.instance = new ConfigManager(workdir);
+    } else if (workdir && path.resolve(workdir) !== path.resolve(ConfigManager.instance.config.workdir)) {
+      ConfigManager.instance = new ConfigManager(workdir);
     }
     return ConfigManager.instance;
+  }
+
+  public static resetInstance(): void {
+    ConfigManager.instance = undefined as any;
   }
 
   public getConfig(): NominConfig {
@@ -63,21 +363,75 @@ export class ConfigManager {
     this.config = { ...this.config, ...partial };
   }
 
+  public saveGlobalConfig(partial?: Partial<NominConfig>): void {
+    if (partial) {
+      this.updateConfig(partial);
+    }
+    try {
+      const globalDir = this.config.globalConfigDir || path.join(os.homedir(), '.nomin');
+      safeMkdirSync(globalDir);
+      const globalPath = path.join(globalDir, 'config.json');
+      const toSave = {
+        activeProvider: this.config.activeProvider,
+        providers: this.config.providers,
+        roles: this.config.roles,
+        maxTurnPerSubtask: this.config.maxTurnPerSubtask,
+        enableDoDGate: this.config.enableDoDGate,
+        enableTodoGate: this.config.enableTodoGate,
+        enableWorktreeIsolation: this.config.enableWorktreeIsolation,
+        logLevel: this.config.logLevel,
+      };
+      fs.writeFileSync(globalPath, JSON.stringify(toSave, null, 2), 'utf8');
+    } catch (err) {
+      console.warn('[ConfigManager] Failed to persist global config:', err);
+    }
+  }
+
   private loadConfig(workdir: string): NominConfig {
-    // 1. Load from environment variables
+    // 1. Load from environment variables (.env in workspace, and ~/.nomin/.env)
     this.loadDotEnv(workdir);
-
-    const nominDir = path.join(workdir, '.nomin');
-    const stateDir = path.join(nominDir, 'state');
-    const worktreeDir = path.join(nominDir, 'worktrees');
-
-    // Ensure required metadata directories exist
-    if (!fs.existsSync(stateDir)) {
-      fs.mkdirSync(stateDir, { recursive: true });
+    const globalEnvPath = path.join(os.homedir(), '.nomin', '.env');
+    if (fs.existsSync(globalEnvPath)) {
+      this.loadEnvFromFile(globalEnvPath);
     }
-    if (!fs.existsSync(worktreeDir)) {
-      fs.mkdirSync(worktreeDir, { recursive: true });
+
+    // 2. Resolve resilient paths
+    const paths = resolveNominPaths(workdir);
+
+    // 3. Load global config (~/.nomin/config.json)
+    const globalConfigPath = path.join(paths.globalConfigDir, 'config.json');
+    let globalFileConfig: Partial<NominConfig> = {};
+    if (fs.existsSync(globalConfigPath)) {
+      try {
+        globalFileConfig = JSON.parse(fs.readFileSync(globalConfigPath, 'utf8'));
+      } catch (err) {
+        console.warn(`[ConfigManager] Failed to parse global config ${globalConfigPath}:`, err);
+      }
     }
+
+    // 4. Load local config if present
+    let localFileConfig: Partial<NominConfig> = {};
+    const localConfigPath = paths.isFallbackState
+      ? path.join(path.dirname(paths.stateDir), 'config.json')
+      : path.join(workdir, '.nomin', 'config.json');
+
+    if (fs.existsSync(localConfigPath) && localConfigPath !== globalConfigPath) {
+      try {
+        localFileConfig = JSON.parse(fs.readFileSync(localConfigPath, 'utf8'));
+      } catch (err) {
+        console.warn(`[ConfigManager] Failed to parse local config ${localConfigPath}:`, err);
+      }
+    }
+
+    const fileRoles: Partial<RoleModelConfig> = {
+      ...(globalFileConfig.roles || {}),
+      ...(localFileConfig.roles || {}),
+    };
+
+    const fileProviders: Record<string, ProviderEndpointConfig> = {
+      ...(globalFileConfig.providers || {}),
+      ...(localFileConfig.providers || {}),
+    };
 
     const defaultProviders: Record<string, ProviderEndpointConfig> = {
       nim: {
@@ -128,6 +482,8 @@ export class ConfigManager {
     };
 
     const activeProvider = process.env.NOMIN_PROVIDER || 
+      localFileConfig.activeProvider ||
+      globalFileConfig.activeProvider ||
       (process.env.NVIDIA_API_KEY ? 'nim' : 
        process.env.DEEPSEEK_API_KEY ? 'deepseek' : 
        process.env.OPENAI_API_KEY ? 'openai' : 'nim');
@@ -140,35 +496,34 @@ export class ConfigManager {
       verifier: process.env.MODEL_VERIFIER || 'deepseek-ai/deepseek-r1',
     };
 
-    let fileConfig: Partial<NominConfig> = {};
-    const configPath = path.join(nominDir, 'config.json');
-    if (fs.existsSync(configPath)) {
-      try {
-        fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      } catch (err) {
-        console.warn(`[ConfigManager] Failed to parse ${configPath}:`, err);
-      }
-    }
+    const resolvedRoles: RoleModelConfig = {
+      architect: fileRoles.architect || defaultRoles.architect,
+      coder: fileRoles.coder || defaultRoles.coder,
+      tester: fileRoles.tester || defaultRoles.tester,
+      verifier: fileRoles.verifier || defaultRoles.verifier,
+    };
 
     return {
-      activeProvider: fileConfig.activeProvider || activeProvider,
-      providers: { ...defaultProviders, ...(fileConfig.providers || {}) },
-      roles: { ...defaultRoles, ...(fileConfig.roles || {}) },
+      activeProvider,
+      providers: { ...defaultProviders, ...fileProviders },
+      roles: resolvedRoles,
       workdir,
-      stateDir,
-      worktreeDir,
-      maxTurnPerSubtask: fileConfig.maxTurnPerSubtask ?? 10,
-      enableDoDGate: fileConfig.enableDoDGate ?? true,
-      enableTodoGate: fileConfig.enableTodoGate ?? true,
-      enableWorktreeIsolation: fileConfig.enableWorktreeIsolation ?? true,
-      logLevel: fileConfig.logLevel || 'info',
+      stateDir: paths.stateDir,
+      worktreeDir: paths.worktreeDir,
+      maxTurnPerSubtask: localFileConfig.maxTurnPerSubtask ?? globalFileConfig.maxTurnPerSubtask ?? 10,
+      enableDoDGate: localFileConfig.enableDoDGate ?? globalFileConfig.enableDoDGate ?? true,
+      enableTodoGate: localFileConfig.enableTodoGate ?? globalFileConfig.enableTodoGate ?? true,
+      enableWorktreeIsolation: localFileConfig.enableWorktreeIsolation ?? globalFileConfig.enableWorktreeIsolation ?? true,
+      logLevel: localFileConfig.logLevel || globalFileConfig.logLevel || 'info',
+      isSystemDir: paths.isSystemDir,
+      isFallbackState: paths.isFallbackState,
+      globalConfigDir: paths.globalConfigDir,
     };
   }
 
-  private loadDotEnv(dir: string): void {
-    const envPath = path.join(dir, '.env');
-    if (fs.existsSync(envPath)) {
-      const content = fs.readFileSync(envPath, 'utf8');
+  private loadEnvFromFile(filePath: string): void {
+    try {
+      const content = fs.readFileSync(filePath, 'utf8');
       for (const line of content.split('\n')) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
@@ -184,6 +539,15 @@ export class ConfigManager {
           }
         }
       }
+    } catch {
+      // Ignore unreadable env file
+    }
+  }
+
+  private loadDotEnv(dir: string): void {
+    const envPath = path.join(dir, '.env');
+    if (fs.existsSync(envPath)) {
+      this.loadEnvFromFile(envPath);
     }
   }
 }
