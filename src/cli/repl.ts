@@ -64,10 +64,10 @@ export class NominREPL {
       providerUrl: activeProv.baseUrl,
       workdir: cfg.workdir,
       gitBranch,
-      architectModel: cfg.roles.architect,
-      coderModel: cfg.roles.coder,
-      testerModel: cfg.roles.tester,
-      verifierModel: cfg.roles.verifier,
+      mode: cfg.mode,
+      activeModel: cfg.activeModel,
+      roles: cfg.roles,
+      selectedModels: cfg.selectedModels,
       rpmLimit: activeProv.defaultRpm,
       tpmLimit: activeProv.defaultTpm,
       concurrency: activeProv.defaultConcurrency,
@@ -290,7 +290,9 @@ export class NominREPL {
     ${ANSI.cyan}/cd <path>${ANSI.reset}    Switch active working directory and git context
     ${ANSI.cyan}/status${ANSI.reset}       Display active Blackboard DAG and agent worktree status
     ${ANSI.cyan}/repomap${ANSI.reset}      Generate and view PageRank-ranked repository symbol outline
-    ${ANSI.cyan}/models${ANSI.reset}       Display current role-to-model configuration
+    ${ANSI.cyan}/models${ANSI.reset}       Display user-selected models and active configuration
+    ${ANSI.cyan}/mode <solo|team>${ANSI.reset} Switch between SOLO (1 model) and TEAM (2-5 agents) mode
+    ${ANSI.cyan}/team <role>=<model>${ANSI.reset} Assign a model to an agent role (e.g. coder=<model>)
     ${ANSI.cyan}/config${ANSI.reset}       Display active rate-limits and provider settings
     ${ANSI.cyan}/clear${ANSI.reset}        Clear the terminal screen
     ${ANSI.cyan}/exit${ANSI.reset}         Exit Nomin Code REPL
@@ -331,11 +333,53 @@ export class NominREPL {
 
       case '/models': {
         const cfg = this.configManager.getConfig();
-        console.log(`\n  ${ANSI.bold}Role-to-Model Configuration (Provider: ${cfg.activeProvider}):${ANSI.reset}`);
-        console.log(`    Architect: ${ANSI.brightCyan}${cfg.roles.architect}${ANSI.reset}`);
-        console.log(`    Coder:     ${ANSI.brightGreen}${cfg.roles.coder}${ANSI.reset}`);
-        console.log(`    Tester:    ${ANSI.brightYellow}${cfg.roles.tester}${ANSI.reset}`);
-        console.log(`    Verifier:  ${ANSI.brightMagenta}${cfg.roles.verifier}${ANSI.reset}\n`);
+        console.log(`\n  ${ANSI.bold}Model Selection & Runtime Configuration:${ANSI.reset}`);
+        console.log(`    Mode:               ${ANSI.brightCyan}${cfg.mode.toUpperCase()}${ANSI.reset}`);
+        console.log(`    Selected Pool:      ${cfg.selectedModels && cfg.selectedModels.length > 0 ? cfg.selectedModels.join(', ') : ANSI.dim + '(none - run nomin setup or nomin model add)' + ANSI.reset}`);
+        if (cfg.mode === 'solo') {
+          console.log(`    Active Model (SOLO):${ANSI.brightGreen} ${cfg.activeModel || '(unassigned)'}${ANSI.reset}`);
+        } else {
+          console.log(`    Team Role Mappings:`);
+          const roles = cfg.roles || {};
+          if (Object.keys(roles).length === 0) {
+            console.log(`      ${ANSI.dim}(no roles assigned yet - use /team role=<model>)${ANSI.reset}`);
+          } else {
+            for (const [r, m] of Object.entries(roles)) {
+              console.log(`      ${r}: ${ANSI.brightCyan}${m}${ANSI.reset}`);
+            }
+          }
+        }
+        console.log();
+        break;
+      }
+
+      case '/mode': {
+        const parts = cmdStr.split(' ');
+        const targetMode = parts[1]?.toLowerCase();
+        if (targetMode === 'solo' || targetMode === 'team') {
+          this.configManager.setMode(targetMode);
+          console.log(`\n  ${ANSI.green}✔ Swarm mode set to ${targetMode.toUpperCase()}${ANSI.reset}\n`);
+        } else {
+          console.log(`\n  Usage: /mode <solo|team>\n`);
+        }
+        break;
+      }
+
+      case '/team': {
+        const parts = cmdStr.split(' ');
+        const assignment = parts[1];
+        if (assignment && assignment.includes('=')) {
+          const [role, modelId] = assignment.split('=');
+          this.configManager.setTeamRole(role.trim(), modelId.trim());
+          console.log(`\n  ${ANSI.green}✔ Team role '${role.trim()}' assigned to '${modelId.trim()}'${ANSI.reset}\n`);
+        } else {
+          const roles = this.configManager.getConfig().roles || {};
+          console.log(`\n  Current Team Roles:`);
+          for (const [r, m] of Object.entries(roles)) {
+            console.log(`    ${r} = ${m}`);
+          }
+          console.log(`  Usage to assign: /team <role>=<model-id>\n`);
+        }
         break;
       }
 

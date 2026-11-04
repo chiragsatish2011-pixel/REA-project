@@ -9,11 +9,10 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 
+export type SwarmMode = 'solo' | 'team';
+
 export interface RoleModelConfig {
-  architect: string;
-  coder: string;
-  tester: string;
-  verifier: string;
+  [roleName: string]: string;
 }
 
 export interface ProviderEndpointConfig {
@@ -27,9 +26,12 @@ export interface ProviderEndpointConfig {
 }
 
 export interface NominConfig {
+  mode: SwarmMode;
+  activeModel?: string;
+  selectedModels: string[];
+  roles: RoleModelConfig;
   activeProvider: string;
   providers: Record<string, ProviderEndpointConfig>;
-  roles: RoleModelConfig;
   workdir: string;
   stateDir: string;
   worktreeDir: string;
@@ -363,6 +365,60 @@ export class ConfigManager {
     this.config = { ...this.config, ...partial };
   }
 
+  public hasConfiguredModel(): boolean {
+    if (this.config.mode === 'solo') {
+      return Boolean(this.config.activeModel);
+    }
+    return Object.keys(this.config.roles).length > 0;
+  }
+
+  public setMode(mode: SwarmMode): void {
+    this.updateConfig({ mode });
+    this.saveGlobalConfig();
+  }
+
+  public setSoloModel(modelId: string): void {
+    this.addModel(modelId);
+    this.updateConfig({ mode: 'solo', activeModel: modelId });
+    this.saveGlobalConfig();
+  }
+
+  public setTeamRole(role: string, modelId: string): void {
+    this.addModel(modelId);
+    const roles = { ...this.config.roles, [role]: modelId };
+    this.updateConfig({ mode: 'team', roles });
+    this.saveGlobalConfig();
+  }
+
+  public addModel(modelId: string): void {
+    const trimmed = modelId.trim();
+    if (!trimmed) return;
+    const existing = new Set(this.config.selectedModels || []);
+    existing.add(trimmed);
+    const selectedModels = Array.from(existing);
+    const update: Partial<NominConfig> = { selectedModels };
+    if (!this.config.activeModel) {
+      update.activeModel = trimmed;
+    }
+    this.updateConfig(update);
+    this.saveGlobalConfig();
+  }
+
+  public removeModel(modelId: string): void {
+    const trimmed = modelId.trim();
+    const selectedModels = (this.config.selectedModels || []).filter(m => m !== trimmed);
+    const roles = { ...this.config.roles };
+    for (const [r, m] of Object.entries(roles)) {
+      if (m === trimmed) delete roles[r];
+    }
+    const update: Partial<NominConfig> = { selectedModels, roles };
+    if (this.config.activeModel === trimmed) {
+      update.activeModel = selectedModels[0] || undefined;
+    }
+    this.updateConfig(update);
+    this.saveGlobalConfig();
+  }
+
   public saveGlobalConfig(partial?: Partial<NominConfig>): void {
     if (partial) {
       this.updateConfig(partial);
@@ -372,6 +428,9 @@ export class ConfigManager {
       safeMkdirSync(globalDir);
       const globalPath = path.join(globalDir, 'config.json');
       const toSave = {
+        mode: this.config.mode,
+        activeModel: this.config.activeModel,
+        selectedModels: this.config.selectedModels,
         activeProvider: this.config.activeProvider,
         providers: this.config.providers,
         roles: this.config.roles,
@@ -488,22 +547,34 @@ export class ConfigManager {
        process.env.DEEPSEEK_API_KEY ? 'deepseek' : 
        process.env.OPENAI_API_KEY ? 'openai' : 'nim');
 
-    // Default 4-agent model mappings
-    const defaultRoles: RoleModelConfig = {
-      architect: process.env.MODEL_ARCHITECT || 'deepseek-ai/deepseek-r1',
-      coder: process.env.MODEL_CODER || 'qwen/qwen2.5-coder-32b-instruct',
-      tester: process.env.MODEL_TESTER || 'qwen/qwen2.5-coder-32b-instruct',
-      verifier: process.env.MODEL_VERIFIER || 'deepseek-ai/deepseek-r1',
-    };
+    // User-controlled mode (default: solo)
+    const mode: SwarmMode = (localFileConfig.mode || globalFileConfig.mode || 'solo') as SwarmMode;
 
+    // User-selected models pool (NO built-in or hardcoded models)
+    const selectedModels: string[] = Array.from(new Set([
+      ...(globalFileConfig.selectedModels || []),
+      ...(localFileConfig.selectedModels || []),
+    ]));
+
+    const activeModel: string | undefined = process.env.NOMIN_MODEL ||
+      localFileConfig.activeModel ||
+      globalFileConfig.activeModel ||
+      (selectedModels.length > 0 ? selectedModels[0] : undefined);
+
+    // User-configured team roles (NO built-in or hardcoded role models)
     const resolvedRoles: RoleModelConfig = {
-      architect: fileRoles.architect || defaultRoles.architect,
-      coder: fileRoles.coder || defaultRoles.coder,
-      tester: fileRoles.tester || defaultRoles.tester,
-      verifier: fileRoles.verifier || defaultRoles.verifier,
+      ...(globalFileConfig.roles || {}),
+      ...(localFileConfig.roles || {}),
     };
+    if (process.env.MODEL_CODER) resolvedRoles.coder = process.env.MODEL_CODER;
+    if (process.env.MODEL_ARCHITECT) resolvedRoles.architect = process.env.MODEL_ARCHITECT;
+    if (process.env.MODEL_TESTER) resolvedRoles.tester = process.env.MODEL_TESTER;
+    if (process.env.MODEL_VERIFIER) resolvedRoles.verifier = process.env.MODEL_VERIFIER;
 
     return {
+      mode,
+      activeModel,
+      selectedModels,
       activeProvider,
       providers: { ...defaultProviders, ...fileProviders },
       roles: resolvedRoles,

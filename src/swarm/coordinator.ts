@@ -37,6 +37,9 @@ export interface SwarmCoordinatorOptions {
   sessionId?: string;
   maxRetriesPerTask?: number;
   useGitWorktrees?: boolean;
+  mode?: 'solo' | 'team';
+  activeModel?: string;
+  roles?: Record<string, string>;
   architectModel?: string;
   coderModel?: string;
   testerModel?: string;
@@ -109,12 +112,7 @@ export class SwarmCoordinator extends EventEmitter {
     });
     this.compactionEngine = new CompactionEngine();
 
-    this.registerAgents({
-      architectModel: options.architectModel || 'deepseek-ai/deepseek-r1',
-      coderModel: options.coderModel || 'qwen/qwen2.5-coder-32b-instruct',
-      testerModel: options.testerModel || 'qwen/qwen2.5-coder-32b-instruct',
-      verifierModel: options.verifierModel || 'deepseek-ai/deepseek-r1',
-    });
+    this.registerAgents(options);
   }
 
   /**
@@ -134,29 +132,39 @@ export class SwarmCoordinator extends EventEmitter {
   }
 
   /**
-   * Registers the 4 core swarm agents on the Blackboard.
+   * Registers swarm agents on Blackboard according to SOLO or TEAM mode.
+   * Ships with NO hardcoded default models.
    */
-  private registerAgents(models: Record<string, string>): void {
-    this.blackboard.registerAgent({
-      agentId: 'agent-architect-01',
-      role: 'Architect',
-      model: models.architectModel,
-    });
-    this.blackboard.registerAgent({
-      agentId: 'agent-coder-01',
-      role: 'Coder',
-      model: models.coderModel,
-    });
-    this.blackboard.registerAgent({
-      agentId: 'agent-tester-01',
-      role: 'Tester',
-      model: models.testerModel,
-    });
-    this.blackboard.registerAgent({
-      agentId: 'agent-verifier-01',
-      role: 'Verifier',
-      model: models.verifierModel,
-    });
+  private registerAgents(options: SwarmCoordinatorOptions): void {
+    const mode = options.mode || (options.roles && Object.keys(options.roles).length > 1 ? 'team' : 'solo');
+    
+    if (mode === 'solo') {
+      const model = options.activeModel || options.coderModel || options.architectModel || 'user-selected-model';
+      // In SOLO mode: 1 model executes tasks
+      this.blackboard.registerAgent({
+        agentId: 'agent-solo-01',
+        role: 'Coder',
+        model,
+      });
+      // In SOLO mode: the Definition-of-Done engine and evidence gate still work,
+      // evaluating with a fresh context using the same model to eliminate self-approval bias.
+      this.blackboard.registerAgent({
+        agentId: 'agent-verifier-01',
+        role: 'Verifier',
+        model,
+      });
+    } else {
+      const roles = options.roles || {};
+      const arch = roles.architect || options.architectModel || options.activeModel || 'user-selected-model';
+      const coder = roles.coder || options.coderModel || options.activeModel || arch;
+      const tester = roles.tester || options.testerModel || options.activeModel || coder;
+      const verifier = roles.verifier || options.verifierModel || options.activeModel || arch;
+
+      this.blackboard.registerAgent({ agentId: 'agent-architect-01', role: 'Architect', model: arch });
+      this.blackboard.registerAgent({ agentId: 'agent-coder-01', role: 'Coder', model: coder });
+      this.blackboard.registerAgent({ agentId: 'agent-tester-01', role: 'Tester', model: tester });
+      this.blackboard.registerAgent({ agentId: 'agent-verifier-01', role: 'Verifier', model: verifier });
+    }
   }
 
   public setArchitectHook(hook: (userGoal: string) => Promise<Array<Omit<SwarmTask, 'createdAt' | 'updatedAt'>>>): void {

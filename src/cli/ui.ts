@@ -53,10 +53,10 @@ export interface BootingTelemetry {
   providerUrl: string;
   workdir: string;
   gitBranch?: string;
-  architectModel: string;
-  coderModel: string;
-  testerModel: string;
-  verifierModel: string;
+  mode?: 'solo' | 'team';
+  activeModel?: string;
+  roles?: Record<string, string>;
+  selectedModels?: string[];
   rpmLimit: number;
   tpmLimit: number;
   concurrency: number;
@@ -68,14 +68,14 @@ export class TerminalUI {
   }
 
   /**
-   * Prints the Claude Code & OpenCode inspired booting sequence.
+   * Prints the model-agnostic booting sequence adhering to 100% user-selected model constraints.
    */
   public static printBootSequence(telemetry: BootingTelemetry): void {
     const w = TerminalUI.width();
 
     console.log();
-    console.log(`  ${ANSI.bold}${ANSI.brightCyan}◆ NOMIN CODE${ANSI.reset}  ${ANSI.gray}v${telemetry.version}${ANSI.reset}  ${ANSI.dim}— Model-Agnostic Multi-Agent Autonomous Coding Swarm${ANSI.reset}`);
-    console.log(`  ${ANSI.gray}NVIDIA NIM · OpenAI Compatible · DeepSeek · Qwen · Local vLLM/Ollama${ANSI.reset}`);
+    console.log(`  ${ANSI.bold}${ANSI.brightCyan}◆ NOMIN CODE${ANSI.reset}  ${ANSI.gray}v${telemetry.version}${ANSI.reset}  ${ANSI.dim}— Model-Agnostic Autonomous Coding Swarm${ANSI.reset}`);
+    console.log(`  ${ANSI.gray}NVIDIA NIM & OpenAI Compatible Endpoints · 100% User-Controlled Models${ANSI.reset}`);
     console.log();
 
     // Boxed Telemetry Card
@@ -83,8 +83,26 @@ export class TerminalUI {
     console.log(`  ${ANSI.gray}╭─ System Telemetry ${headerBorder}╮${ANSI.reset}`);
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Provider:${ANSI.reset}   ${telemetry.providerName} ${ANSI.dim}(${telemetry.providerUrl})${ANSI.reset}`);
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Workspace:${ANSI.reset}  ${telemetry.workdir} ${ANSI.gray}[branch: ${telemetry.gitBranch || 'main'}]${ANSI.reset}`);
-    console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Swarm:${ANSI.reset}      4 Specialized Agents ${ANSI.dim}[Architect · Coder · Tester · Verifier]${ANSI.reset}`);
-    console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Models:${ANSI.reset}     Architect: ${ANSI.brightCyan}${telemetry.architectModel}${ANSI.reset} | Coder: ${ANSI.brightGreen}${telemetry.coderModel}${ANSI.reset}`);
+
+    const hasRoles = telemetry.roles && Object.keys(telemetry.roles).length > 0;
+    const hasModel = Boolean(telemetry.activeModel) || hasRoles;
+
+    if (!hasModel) {
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.yellow}● Mode:${ANSI.reset}       SETUP REQUIRED`);
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.yellow}● Models:${ANSI.reset}     ⚠️  No models selected.`);
+      console.log(`  ${ANSI.gray}│${ANSI.reset}                ${ANSI.dim}Run 'nomin setup' or 'nomin model add <model-id>' to select models.${ANSI.reset}`);
+    } else if (telemetry.mode === 'team' || (!telemetry.mode && hasRoles)) {
+      const roleKeys = Object.keys(telemetry.roles || {});
+      const roleSummary = roleKeys
+        .map(k => `${k}: ${ANSI.brightCyan}${telemetry.roles![k]}${ANSI.reset}`)
+        .join(' | ');
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Mode:${ANSI.reset}       TEAM [${roleKeys.length} Agents · Shared Blackboard & Mailbox]`);
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Roles:${ANSI.reset}      ${roleSummary || ANSI.dim + '(unassigned)' + ANSI.reset}`);
+    } else {
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Mode:${ANSI.reset}       SOLO [1 Model · Fresh-Context Verifier Gate]`);
+      console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Model:${ANSI.reset}      ${ANSI.brightCyan}${telemetry.activeModel}${ANSI.reset}`);
+    }
+
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Gateways:${ANSI.reset}   ${ANSI.green}[DoD Evidence Gate]${ANSI.reset} ${ANSI.yellow}[Grok TodoGate]${ANSI.reset} ${ANSI.blue}[PageRank RepoMap]${ANSI.reset}`);
     console.log(`  ${ANSI.gray}│${ANSI.reset}  ${ANSI.cyan}● Limits:${ANSI.reset}     ${telemetry.rpmLimit} RPM · ${telemetry.tpmLimit.toLocaleString()} TPM · Concurrency Cap: ${telemetry.concurrency}`);
     if (isSystemDirectory(telemetry.workdir)) {

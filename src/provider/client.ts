@@ -97,6 +97,68 @@ export class NominHttpClient extends EventEmitter {
   }
 
   /**
+   * Fetches live available model catalog from provider (GET /models).
+   * Used for dynamic model discovery from the user's NVIDIA NIM account.
+   */
+  public async listModels(): Promise<Array<{ id: string; object?: string; created?: number; owned_by?: string }>> {
+    const rawUrl = `${this.getBaseURL().replace(/\/+$/, '')}/models`;
+    const url = new URL(rawUrl);
+    const isHttps = url.protocol === 'https:';
+    const agent = isHttps ? this.httpsAgent : this.httpAgent;
+    const clientModule = isHttps ? https : http;
+
+    const headers: Record<string, string> = {
+      'Accept': 'application/json',
+      'User-Agent': 'NominCode-UniversalClient/1.0',
+    };
+    if (this.config.apiKey) {
+      headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+    }
+
+    return new Promise((resolve, reject) => {
+      const req = clientModule.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: `${url.pathname}${url.search}`,
+          method: 'GET',
+          agent,
+          headers,
+          timeout: this.config.timeoutMs ?? 30000,
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              try {
+                const parsed = JSON.parse(data);
+                const models = Array.isArray(parsed.data) ? parsed.data : (Array.isArray(parsed) ? parsed : []);
+                resolve(models.map((m: any) => ({
+                  id: typeof m === 'string' ? m : m.id,
+                  object: m.object,
+                  created: m.created,
+                  owned_by: m.owned_by,
+                })));
+              } catch (err) {
+                reject(new Error(`Failed to parse models response: ${(err as Error).message}`));
+              }
+            } else {
+              reject(new NominHttpError(res.statusCode || 500, `Failed to list models: ${data.slice(0, 200)}`, {}, data));
+            }
+          });
+        }
+      );
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Timed out listing models from provider.'));
+      });
+      req.end();
+    });
+  }
+
+  /**
    * Non-streaming chat completion request with rate-limiting and retry logic.
    */
   public async chat(options: ChatCompletionOptions): Promise<ChatCompletionResponse> {
