@@ -63,16 +63,22 @@ export class ToolRegistry {
   }
 
   /**
-   * Retrieves a tool by name.
+   * Retrieves a tool by name (with alias support for bash -> execute_command).
    */
   public getTool(name: string): Tool | undefined {
+    if (name === 'bash') {
+      return this.tools.get('execute_command') || this.tools.get('bash');
+    }
     return this.tools.get(name);
   }
 
   /**
-   * Checks whether a tool exists in the registry.
+   * Checks whether a tool exists in the registry (with alias support).
    */
   public hasTool(name: string): boolean {
+    if (name === 'bash') {
+      return this.tools.has('execute_command') || this.tools.has('bash');
+    }
     return this.tools.has(name);
   }
 

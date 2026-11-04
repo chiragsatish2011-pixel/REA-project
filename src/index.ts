@@ -17,6 +17,7 @@ export { NominHttpClient, NominHttpError } from './provider/client.js';
 export { NominRateLimitScheduler, TokenBucket, RequestPriority } from './provider/rate-limiter.js';
 export { CapabilityProbe } from './provider/capability-probe.js';
 export { JsonRepair } from './provider/json-repair.js';
+export { MockLLMProvider, MockScenarioBuilder, AgentSimulationHarness, type MockTurnResponse, type AdversarialMode, type AdversarialConfig } from './provider/mock.js';
 
 // Tool Layer
 export { ToolRegistry } from './tools/index.js';
@@ -32,10 +33,11 @@ export { SwarmCoordinator } from './swarm/coordinator.js';
 export { Blackboard } from './swarm/blackboard.js';
 export { SwarmMailbox } from './swarm/mailbox.js';
 export { ReminderTracker } from './swarm/reminder-policy.js';
-export { CompactionEngine } from './swarm/compaction.js';
+export { CompactionEngine, estimateTokens } from './swarm/compaction.js';
+export type { SwarmTask, AcceptanceCriterion, SwarmRole } from './swarm/types.js';
 
 // Verifier Layer
-export { DefinitionOfDoneEngine } from './verifier/dod-engine.js';
+export { DefinitionOfDoneEngine, DefinitionOfDoneEngine as DoDEngine } from './verifier/dod-engine.js';
 export { AstIntegrityInspector } from './verifier/ast-integrity.js';
 
 // Terminal UX Layer

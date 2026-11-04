@@ -103,6 +103,7 @@ export interface ChatCompletionOptions {
   speculativeToolExecution?: boolean;
   onSpeculativeToolCall?: (toolCall: ToolCall, isPartial: boolean) => void;
   headers?: Record<string, string>;
+  enablePromptCaching?: boolean;
 }
 
 export interface TokenUsage {
@@ -186,6 +187,10 @@ export interface ChatCompletionResponse {
   model: string;
   choices: ChatCompletionChoice[];
   usage?: TokenUsage;
+  metrics?: {
+    ttftMs?: number;
+    totalDurationMs?: number;
+  };
   created?: number;
 }
 
@@ -248,12 +253,13 @@ export interface ModelProfile {
 }
 
 export interface ProviderConfig {
-  id: string;
-  name: string;
+  id?: string;
+  name?: string;
   type: ProviderType;
   baseURL: string;
   apiKey?: string;
   defaultModel?: string;
+  models?: string[];
   headers?: Record<string, string>;
   rateLimit?: RateLimiterConfig;
   timeoutMs?: number;

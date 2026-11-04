@@ -9,11 +9,13 @@
  * Contains session, agent, workspace, and tracing identifiers.
  */
 export interface ToolExecutionContext {
-  sessionID: string;
-  agentID: string;
+  sessionID?: string;
+  agentID?: string;
   worktreePath: string;
-  callID: string;
+  callID?: string;
   abortSignal?: AbortSignal;
+  role?: string;
+  taskId?: string;
 }
 
 /**

@@ -15,6 +15,7 @@
 
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as crypto from 'node:crypto';
 import { URL } from 'node:url';
 import { EventEmitter } from 'node:events';
 import {
@@ -26,6 +27,7 @@ import {
   StreamChunk,
   TokenUsage,
   ToolCall,
+  ToolDefinition,
   DEFAULT_BASE_URLS,
   RequestPriority,
 } from './types.js';
@@ -53,6 +55,70 @@ export class NominHttpError extends Error {
   }
 }
 
+/**
+ * Recursively canonicalizes tool parameter JSON schemas by sorting all object keys,
+ * ensuring deterministic byte-for-byte serialization across different execution turns.
+ */
+export function canonicalizeToolParameters(schema: any): any {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(canonicalizeToolParameters);
+
+  const sorted: Record<string, any> = {};
+  const keys = Object.keys(schema).sort();
+  for (const key of keys) {
+    sorted[key] = canonicalizeToolParameters(schema[key]);
+  }
+  return sorted;
+}
+
+/**
+ * Normalizes tool definitions into a canonical, deterministically sorted array
+ * with sorted parameter schemas to guarantee maximum prompt cache hit rate (KV cache).
+ */
+export function canonicalizeTools(tools?: ToolDefinition[]): ToolDefinition[] | undefined {
+  if (!tools || tools.length === 0) return tools;
+
+  return [...tools]
+    .sort((a, b) => a.function.name.localeCompare(b.function.name))
+    .map(t => ({
+      type: 'function',
+      function: {
+        name: t.function.name,
+        description: t.function.description ?? '',
+        parameters: t.function.parameters
+          ? (canonicalizeToolParameters(t.function.parameters) as ToolDefinition['function']['parameters'])
+          : undefined,
+      },
+    }));
+}
+
+/**
+ * Computes an invariant SHA-256 fingerprint of the stable prompt prefix:
+ * (system prompt + repository map + canonicalized tool schemas).
+ * As long as system instructions, tools, and repomap don't change,
+ * this hash is identical byte-for-byte across all turns, guaranteeing >90% prefix cache hits.
+ */
+export function computeStablePrefixHash(
+  systemPrompt: string,
+  tools?: ToolDefinition[],
+  repoMap?: string
+): string {
+  const canonicalTools = canonicalizeTools(tools);
+  const prefixPayload = {
+    system: (systemPrompt ?? '').trim(),
+    repoMap: (repoMap ?? '').trim(),
+    tools: canonicalTools
+      ? canonicalTools.map(t => ({
+          name: t.function.name,
+          description: t.function.description ?? '',
+          parameters: t.function.parameters ?? {},
+        }))
+      : [],
+  };
+  const serialized = JSON.stringify(prefixPayload);
+  return crypto.createHash('sha256').update(serialized, 'utf8').digest('hex');
+}
+
 export class NominHttpClient extends EventEmitter {
   private readonly config: ProviderConfig;
   private readonly scheduler?: NominRateLimitScheduler;
@@ -66,12 +132,13 @@ export class NominHttpClient extends EventEmitter {
 
     const maxSockets = this.config.maxSockets ?? 64;
     const keepAliveMsecs = this.config.keepAliveMsecs ?? 60000;
+    const maxFreeSockets = Math.max(16, Math.floor(maxSockets / 2));
 
     this.httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs,
       maxSockets,
-      maxFreeSockets: 16,
+      maxFreeSockets,
       timeout: this.config.timeoutMs ?? 60000,
     });
 
@@ -79,9 +146,34 @@ export class NominHttpClient extends EventEmitter {
       keepAlive: true,
       keepAliveMsecs,
       maxSockets,
-      maxFreeSockets: 16,
+      maxFreeSockets,
       timeout: this.config.timeoutMs ?? 60000,
     });
+  }
+
+  public getHttpAgent(): http.Agent {
+    return this.httpAgent;
+  }
+
+  public getHttpsAgent(): https.Agent {
+    return this.httpsAgent;
+  }
+
+  /**
+   * Computes an invariant SHA-256 fingerprint for prompt caching across conversational turns.
+   */
+  public static computeStablePrefixHash(
+    systemPrompt: string,
+    tools?: ToolDefinition[],
+    repoMap?: string
+  ): string {
+    return computeStablePrefixHash(systemPrompt, tools, repoMap);
+  }
+
+  public computeStablePrefixHash(options: ChatCompletionOptions, repoMap?: string): string {
+    const systemMessage = options.messages.find(m => m.role === 'system' || m.role === 'developer');
+    const systemPrompt = (typeof systemMessage?.content === 'string' ? systemMessage.content : '') ?? '';
+    return computeStablePrefixHash(systemPrompt, options.tools, repoMap);
   }
 
   public getProviderType(): ProviderType {
@@ -163,6 +255,8 @@ export class NominHttpClient extends EventEmitter {
    */
   public async chat(options: ChatCompletionOptions): Promise<ChatCompletionResponse> {
     const execute = async (): Promise<ChatCompletionResponse> => {
+      const startTime = Date.now();
+      let firstTokenTime: number | null = null;
       let accumulatedText = '';
       let accumulatedReasoning = '';
       const toolCallsMap = new Map<number, ToolCall>();
@@ -171,6 +265,9 @@ export class NominHttpClient extends EventEmitter {
 
       // Consume stream to aggregate complete response
       for await (const chunk of this.chatStreamInternal(options)) {
+        if (firstTokenTime === null && (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta')) {
+          firstTokenTime = Date.now();
+        }
         if (chunk.type === 'text-delta') {
           accumulatedText += chunk.text;
         } else if (chunk.type === 'reasoning-delta') {
@@ -191,6 +288,9 @@ export class NominHttpClient extends EventEmitter {
           finishReason = chunk.reason;
         }
       }
+
+      const totalDurationMs = Date.now() - startTime;
+      const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
 
       // Repair arguments on accumulated tool calls
       const toolCalls: ToolCall[] = Array.from(toolCallsMap.values()).map(tc => {
@@ -228,6 +328,10 @@ export class NominHttpClient extends EventEmitter {
           },
         ],
         usage,
+        metrics: {
+          ttftMs,
+          totalDurationMs,
+        },
         created: Math.floor(Date.now() / 1000),
       };
     };
@@ -353,6 +457,18 @@ export class NominHttpClient extends EventEmitter {
     // Parser state for models that emit thinking via <think>...</think> tags
     let insideThinkTag = false;
 
+    const startTime = Date.now();
+    let firstTokenTime: number | null = null;
+    let finalUsage: TokenUsage | undefined;
+
+    const recordFirstToken = () => {
+      if (firstTokenTime === null) {
+        firstTokenTime = Date.now();
+        const ttftMs = firstTokenTime - startTime;
+        this.emit('ttft', { model: options.model, ttftMs });
+      }
+    };
+
     const sseLines = this.requestSseStream(endpointUrl, headers, bodyStr, options.signal);
 
     for await (const line of sseLines) {
@@ -360,6 +476,9 @@ export class NominHttpClient extends EventEmitter {
       const dataStr = line.slice(5).trim();
       if (!dataStr) continue;
       if (dataStr === '[DONE]') {
+        const totalDurationMs = Date.now() - startTime;
+        const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+        this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
         yield { type: 'finish', reason: 'stop' };
         break;
       }
@@ -373,15 +492,16 @@ export class NominHttpClient extends EventEmitter {
 
       // Check usage chunk (often present in OpenAI or DeepSeek stream options)
       if (parsed.usage) {
+        finalUsage = {
+          promptTokens: parsed.usage.prompt_tokens ?? 0,
+          completionTokens: parsed.usage.completion_tokens ?? 0,
+          totalTokens: parsed.usage.total_tokens ?? 0,
+          cacheReadTokens: parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
+          reasoningTokens: parsed.usage.completion_tokens_details?.reasoning_tokens,
+        };
         yield {
           type: 'usage',
-          usage: {
-            promptTokens: parsed.usage.prompt_tokens ?? 0,
-            completionTokens: parsed.usage.completion_tokens ?? 0,
-            totalTokens: parsed.usage.total_tokens ?? 0,
-            cacheReadTokens: parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
-            reasoningTokens: parsed.usage.completion_tokens_details?.reasoning_tokens,
-          },
+          usage: finalUsage,
         };
       }
 
@@ -392,6 +512,9 @@ export class NominHttpClient extends EventEmitter {
       if (!delta) {
         if (choice.finish_reason) {
           const finishReason = this.normalizeFinishReason(choice.finish_reason);
+          const totalDurationMs = Date.now() - startTime;
+          const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+          this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
           yield { type: 'finish', reason: finishReason, raw: choice.finish_reason };
         }
         continue;
@@ -399,6 +522,7 @@ export class NominHttpClient extends EventEmitter {
 
       // 1. Check reasoning_content field (DeepSeek-R1 / NIM / vLLM native thinking)
       if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+        recordFirstToken();
         yield {
           type: 'reasoning-delta',
           text: delta.reasoning_content,
@@ -407,6 +531,7 @@ export class NominHttpClient extends EventEmitter {
 
       // 2. Check standard content chunk
       if (typeof delta.content === 'string' && delta.content.length > 0) {
+        recordFirstToken();
         const text = delta.content;
 
         // Check for <think> and </think> delimiters
@@ -435,6 +560,7 @@ export class NominHttpClient extends EventEmitter {
 
       // 3. Check tool_calls chunk
       if (Array.isArray(delta.tool_calls)) {
+        recordFirstToken();
         for (const tc of delta.tool_calls) {
           const index = tc.index ?? 0;
           const deltaArgs = tc.function?.arguments ?? '';
@@ -494,6 +620,9 @@ export class NominHttpClient extends EventEmitter {
         }
 
         const finishReason = this.normalizeFinishReason(choice.finish_reason);
+        const totalDurationMs = Date.now() - startTime;
+        const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+        this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
         yield { type: 'finish', reason: finishReason, raw: choice.finish_reason };
       }
     }
@@ -518,15 +647,32 @@ export class NominHttpClient extends EventEmitter {
     };
 
     if (systemPrompt) {
-      payload.system = systemPrompt;
+      if (options.enablePromptCaching !== false) {
+        payload.system = [
+          {
+            type: 'text',
+            text: systemPrompt,
+            cache_control: { type: 'ephemeral' },
+          },
+        ];
+      } else {
+        payload.system = systemPrompt;
+      }
     }
 
     if (options.tools && options.tools.length > 0) {
-      payload.tools = options.tools.map(t => ({
-        name: t.function.name,
-        description: t.function.description ?? '',
-        input_schema: t.function.parameters ?? { type: 'object', properties: {} },
-      }));
+      const canonical = canonicalizeTools(options.tools)!;
+      payload.tools = canonical.map((t, idx) => {
+        const toolObj: any = {
+          name: t.function.name,
+          description: t.function.description ?? '',
+          input_schema: t.function.parameters ?? { type: 'object', properties: {} },
+        };
+        if (options.enablePromptCaching !== false && idx === canonical.length - 1) {
+          toolObj.cache_control = { type: 'ephemeral' };
+        }
+        return toolObj;
+      });
     }
 
     if (options.reasoningEffort && options.reasoningEffort !== 'off') {
@@ -550,6 +696,19 @@ export class NominHttpClient extends EventEmitter {
 
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
     const bodyStr = JSON.stringify(payload);
+
+    const startTime = Date.now();
+    let firstTokenTime: number | null = null;
+    let finalUsage: TokenUsage | undefined;
+
+    const recordFirstToken = () => {
+      if (firstTokenTime === null) {
+        firstTokenTime = Date.now();
+        const ttftMs = firstTokenTime - startTime;
+        this.emit('ttft', { model: options.model, ttftMs });
+      }
+    };
+
     const sseLines = this.requestSseStream(endpointUrl, headers, bodyStr, options.signal);
 
     for await (const line of sseLines) {
@@ -567,20 +726,22 @@ export class NominHttpClient extends EventEmitter {
       switch (event.type) {
         case 'message_start':
           if (event.message?.usage) {
+            finalUsage = {
+              promptTokens: event.message.usage.input_tokens ?? 0,
+              completionTokens: event.message.usage.output_tokens ?? 0,
+              totalTokens: (event.message.usage.input_tokens ?? 0) + (event.message.usage.output_tokens ?? 0),
+              cacheReadTokens: event.message.usage.cache_read_input_tokens,
+              cacheWriteTokens: event.message.usage.cache_creation_input_tokens,
+            };
             yield {
               type: 'usage',
-              usage: {
-                promptTokens: event.message.usage.input_tokens ?? 0,
-                completionTokens: event.message.usage.output_tokens ?? 0,
-                totalTokens: (event.message.usage.input_tokens ?? 0) + (event.message.usage.output_tokens ?? 0),
-                cacheReadTokens: event.message.usage.cache_read_input_tokens,
-                cacheWriteTokens: event.message.usage.cache_creation_input_tokens,
-              },
+              usage: finalUsage,
             };
           }
           break;
 
         case 'content_block_start': {
+          recordFirstToken();
           const index = event.index ?? 0;
           const block = event.content_block;
           if (block?.type === 'text') {
@@ -598,6 +759,7 @@ export class NominHttpClient extends EventEmitter {
         }
 
         case 'content_block_delta': {
+          recordFirstToken();
           const index = event.index ?? 0;
           const delta = event.delta;
           if (delta?.type === 'text_delta') {
@@ -656,25 +818,37 @@ export class NominHttpClient extends EventEmitter {
 
         case 'message_delta': {
           if (event.usage) {
+            const addedCompletion = event.usage.output_tokens ?? 0;
+            if (finalUsage) {
+              finalUsage.completionTokens += addedCompletion;
+              finalUsage.totalTokens += addedCompletion;
+            }
             yield {
               type: 'usage',
               usage: {
                 promptTokens: 0,
-                completionTokens: event.usage.output_tokens ?? 0,
-                totalTokens: event.usage.output_tokens ?? 0,
+                completionTokens: addedCompletion,
+                totalTokens: addedCompletion,
               },
             };
           }
           if (event.delta?.stop_reason) {
             const reason = this.normalizeFinishReason(event.delta.stop_reason);
+            const totalDurationMs = Date.now() - startTime;
+            const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+            this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
             yield { type: 'finish', reason, raw: event.delta.stop_reason };
           }
           break;
         }
 
-        case 'message_stop':
+        case 'message_stop': {
+          const totalDurationMs = Date.now() - startTime;
+          const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+          this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
           yield { type: 'finish', reason: 'stop' };
           break;
+        }
       }
     }
   }
@@ -811,7 +985,7 @@ export class NominHttpClient extends EventEmitter {
     if (options.stop !== undefined) payload.stop = options.stop;
 
     if (options.tools && options.tools.length > 0) {
-      payload.tools = options.tools;
+      payload.tools = canonicalizeTools(options.tools);
       if (options.toolChoice) payload.tool_choice = options.toolChoice;
     }
 

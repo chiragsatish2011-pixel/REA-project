@@ -4,3 +4,4 @@
 
 export * from './dod-engine.js';
 export * from './ast-integrity.js';
+export * from './types.js';

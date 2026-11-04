@@ -60,6 +60,7 @@ export interface SchedulerMetrics {
   totalDispatched: number;
   totalThrottled: number;
   totalRetried: number;
+  totalTokensProcessed: number;
 }
 
 /**
@@ -243,6 +244,7 @@ export class NominRateLimitScheduler {
   private totalDispatchedCount: number = 0;
   private totalThrottledCount: number = 0;
   private totalRetriedCount: number = 0;
+  private totalTokensProcessed: number = 0;
 
   constructor(config: RateLimiterConfig) {
     this.rpmBucket = new TokenBucket(config.rpmLimit, 60000);
@@ -454,10 +456,23 @@ export class NominRateLimitScheduler {
         if (unused > 0) {
           this.tpmBucket.refund(unused);
         }
+        this.totalTokensProcessed += actualTokensUsed.totalTokens;
+        if (task.onTokensUsed) {
+          task.onTokensUsed(actualTokensUsed);
+        }
       } else {
         // Fallback refund: 40% of maxTokens
         const refundEstimate = Math.floor(task.maxTokens * 0.4);
         this.tpmBucket.refund(refundEstimate);
+        const estimatedTokens = Math.max(1, reservedTokens - refundEstimate);
+        this.totalTokensProcessed += estimatedTokens;
+        if (task.onTokensUsed) {
+          task.onTokensUsed({
+            promptTokens: task.promptTokens,
+            completionTokens: Math.max(1, task.maxTokens - refundEstimate),
+            totalTokens: estimatedTokens,
+          });
+        }
       }
 
       this.aimdGate.release();
@@ -636,6 +651,7 @@ export class NominRateLimitScheduler {
       totalDispatched: this.totalDispatchedCount,
       totalThrottled: this.totalThrottledCount,
       totalRetried: this.totalRetriedCount,
+      totalTokensProcessed: this.totalTokensProcessed,
     };
   }
 

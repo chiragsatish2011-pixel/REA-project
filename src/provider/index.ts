@@ -8,3 +8,4 @@ export * from './rate-limiter.js';
 export * from './capability-probe.js';
 export * from './json-repair.js';
 export * from './client.js';
+export * from './mock.js';

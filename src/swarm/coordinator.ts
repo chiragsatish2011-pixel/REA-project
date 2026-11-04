@@ -21,6 +21,7 @@ import { Blackboard } from './blackboard.js';
 import { SwarmMailbox } from './mailbox.js';
 import { ReminderTracker, type TodoGateDecision } from './reminder-policy.js';
 import { CompactionEngine, estimateTokens } from './compaction.js';
+import { DoDEngine, type TaskCompletionCertificate } from '../verifier/index.js';
 import type {
   AcceptanceCriterion,
   NominAgentMessage,
@@ -78,6 +79,7 @@ export class SwarmCoordinator extends EventEmitter {
   public readonly mailbox: SwarmMailbox;
   public readonly reminderTracker: ReminderTracker;
   public readonly compactionEngine: CompactionEngine;
+  public readonly dodEngine: DoDEngine;
 
   private workspaceRoot: string;
   private worktreesBaseDir: string;
@@ -111,6 +113,7 @@ export class SwarmCoordinator extends EventEmitter {
       todo_gate: { enabled: true, max_fires_per_prompt: 2 },
     });
     this.compactionEngine = new CompactionEngine();
+    this.dodEngine = new DoDEngine({ workspaceRoot: this.workspaceRoot });
 
     this.registerAgents(options);
   }
@@ -122,6 +125,7 @@ export class SwarmCoordinator extends EventEmitter {
     this.workspaceRoot = path.resolve(newWorkdir);
     this.worktreesBaseDir = path.join(this.workspaceRoot, '.nomin', 'worktrees');
     this.blackboard.switchWorkspace(this.workspaceRoot);
+    this.dodEngine.setWorkspaceRoot(this.workspaceRoot);
   }
 
   /**
@@ -435,6 +439,10 @@ export class SwarmCoordinator extends EventEmitter {
         this.blackboard.updateTask(task.id, {
           status: 'VERIFIED',
           commitHash: coderResult.commitHash,
+          metadata: {
+            ...task.metadata,
+            certificate: verificationVerdict.certificate,
+          },
         });
 
         // Merge worktree back to primary workspace
@@ -450,11 +458,14 @@ export class SwarmCoordinator extends EventEmitter {
           payload: {
             taskId: task.id,
             status: 'VERIFIED',
-            feedback: 'Definition of Done confirmed with machine execution proof.',
+            feedback: 'Definition of Done confirmed with machine execution proof and valid certificate.',
           },
         });
 
-        this.emit('task:verified', { taskId: task.id });
+        this.emit('task:verified', {
+          taskId: task.id,
+          certificate: verificationVerdict.certificate,
+        });
         return;
       } else {
         // Verification failed
@@ -482,6 +493,10 @@ export class SwarmCoordinator extends EventEmitter {
         await this.cleanupWorktree(testerWorktree);
 
         if (retries > maxRetries) {
+          this.blackboard.updateTask(task.id, {
+            status: 'REJECTED',
+            errorFeedback: `Task ${task.id} rejected by Verifier after ${maxRetries} iterations: ${verificationVerdict.feedback}`,
+          });
           throw new Error(`Task ${task.id} rejected by Verifier after ${maxRetries} iterations: ${verificationVerdict.feedback}`);
         }
       }
@@ -677,30 +692,85 @@ export class SwarmCoordinator extends EventEmitter {
     task: SwarmTask,
     worktreePath: string,
     testResult: { success: boolean; evidence: any; feedback?: string }
-  ): Promise<{ success: boolean; feedback?: string }> {
+  ): Promise<{ success: boolean; feedback?: string; certificate?: TaskCompletionCertificate }> {
     if (this.verifierHook) {
       const incoming = this.mailbox.drainQueue('Verifier', { taskId: task.id });
-      return this.verifierHook(
+      const hookResult = await this.verifierHook(
         { task, role: 'Verifier', worktreePath, blackboard: this.blackboard, mailbox: this.mailbox },
         incoming
       );
+      if (!hookResult.success) {
+        return {
+          success: false,
+          feedback: hookResult.feedback || 'Verifier hook rejected task.',
+        };
+      }
     }
 
-    // 1. Check all criteria are verified
+    // 1. Check all criteria on Blackboard
     const currentTask = this.blackboard.getTask(task.id);
     if (!currentTask) {
       return { success: false, feedback: `Task '${task.id}' not found on Blackboard.` };
     }
 
-    const unverified = currentTask.acceptanceCriteria.filter((c) => !c.verified);
-    if (unverified.length > 0) {
+    // 2. Extract git diff from worktree or commit
+    let diffText = '';
+    try {
+      const { stdout } = await execFileAsync('git', ['diff', 'HEAD~1', 'HEAD'], {
+        cwd: worktreePath,
+      });
+      diffText = stdout;
+    } catch {
+      try {
+        const { stdout } = await execFileAsync('git', ['diff'], {
+          cwd: worktreePath,
+        });
+        diffText = stdout;
+      } catch {
+        // Fallback for non-git or bare directory
+      }
+    }
+
+    // 3. Machine-executable Definition-of-Done Final Gate Verification
+    const gateVerdict = await this.dodEngine.verifyFinalGate(task, {
+      worktreePath,
+      diffText,
+    });
+
+    if (!gateVerdict.approved) {
       return {
         success: false,
-        feedback: `Definition of Done failed: Unverified criteria remaining: ${unverified.map((u) => u.name).join(', ')}`,
+        feedback: gateVerdict.reason + (gateVerdict.feedback ? `\n${gateVerdict.feedback}` : ''),
+        certificate: gateVerdict.certificate,
       };
     }
 
-    // 2. Turn-end TodoGate check
+    // 4. Verify TaskCompletionCertificate validity and cryptographic signature
+    if (!gateVerdict.certificate) {
+      return {
+        success: false,
+        feedback: 'Definition of Done gate failed: Missing TaskCompletionCertificate.',
+      };
+    }
+
+    const certAudit = DoDEngine.verifyCertificateIntegrity(gateVerdict.certificate);
+    if (!certAudit.valid) {
+      return {
+        success: false,
+        feedback: `SECURITY_ALERT: TaskCompletionCertificate failed integrity verification (${certAudit.reason}).`,
+        certificate: gateVerdict.certificate,
+      };
+    }
+
+    if (!gateVerdict.certificate.verified) {
+      return {
+        success: false,
+        feedback: 'Definition of Done gate rejected: Certificate verified flag is false.',
+        certificate: gateVerdict.certificate,
+      };
+    }
+
+    // 5. Turn-end TodoGate check
     const gateDecision: TodoGateDecision = this.reminderTracker.evaluateGate(false, {
       pending: [],
       inProgress: [],
@@ -712,7 +782,8 @@ export class SwarmCoordinator extends EventEmitter {
 
     return {
       success: true,
-      feedback: 'All acceptance criteria validated with reproducible evidence. Approved for release.',
+      feedback: 'All acceptance criteria validated with reproducible evidence and signed certificate.',
+      certificate: gateVerdict.certificate,
     };
   }
 }

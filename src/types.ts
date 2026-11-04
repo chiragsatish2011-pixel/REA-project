@@ -2,6 +2,8 @@
  * Nomin Code: Global Type Definitions & Domain Contracts
  */
 
+import type { TaskCompletionCertificate } from './verifier/types.js';
+
 export type AgentRole = 'architect' | 'coder' | 'tester' | 'verifier' | 'system' | 'user';
 
 export type TaskStatus = 'PENDING' | 'IN_PROGRESS' | 'BLOCKED' | 'CODE_SUBMITTED' | 'TESTS_PASSED' | 'VERIFIED' | 'REJECTED';
@@ -37,8 +39,8 @@ export interface TaskDAG {
 }
 
 export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  role: 'system' | 'user' | 'assistant' | 'tool' | 'developer';
+  content: string | null;
   reasoningContent?: string;
   name?: string;
   toolCallId?: string;
@@ -68,6 +70,7 @@ export interface ReviewVerdict {
   reason: string;
   feedback?: string;
   integrityViolation?: boolean;
+  certificate?: TaskCompletionCertificate;
   verifiedCriteria: string[];
   failedCriteria: string[];
   evidenceLogs: Array<{

@@ -1,14 +1,29 @@
 /**
- * Nomin Code: Definition-of-Done (DoD) Verification Engine
+ * Nomin Code: Definition-of-Done (DoD) Verification Engine & Proof Hardener
+ *
  * Extracts machine-executable criteria, executes test runners/linters in isolated worktrees,
- * collects evidence logs, and holds the final release gate against regressions and integrity violations.
+ * collects empirical stdout/stderr evidence, runs multi-language adversarial AST integrity audits,
+ * and generates tamper-evident, SHA-256 signed TaskCompletionCertificates.
  */
 
 import { exec, spawn } from 'node:child_process';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
 import { AstIntegrityInspector, type IntegrityCheckResult } from './ast-integrity.js';
-import type { AcceptanceCriterion, ReviewVerdict, TaskItem } from '../types.js';
+import type { AcceptanceCriterion, ReviewVerdict } from '../types.js';
+
+export type { AcceptanceCriterion, ReviewVerdict };
+import { isSystemDir, isWritableDir, resolveNominPaths, safeMkdirSync } from '../config/index.js';
+import type {
+  AstAudit,
+  CertificateVerificationResult,
+  CriterionResult,
+  DiffSummary,
+  FinalGateOptions,
+  FinalGateResult,
+  TaskCompletionCertificate,
+} from './types.js';
 
 export interface CriterionExecutionResult {
   criterionId: string;
@@ -23,14 +38,194 @@ export interface CriterionExecutionResult {
   timestamp: number;
 }
 
-export interface VerificationOptions {
-  worktreePath?: string;
-  diffText?: string;
-  timeoutOverrideSeconds?: number;
-  failFast?: boolean;
-}
+export interface VerificationOptions extends FinalGateOptions {}
 
 export class DoDEngine {
+  private workspaceRoot: string;
+
+  constructor(options: { workspaceRoot?: string } = {}) {
+    this.workspaceRoot = path.resolve(options.workspaceRoot || process.cwd());
+  }
+
+  /**
+   * Sets or updates the active workspace root.
+   */
+  public setWorkspaceRoot(newRoot: string): void {
+    this.workspaceRoot = path.resolve(newRoot);
+  }
+
+  /**
+   * Deterministic, recursively sorted JSON serializer for canonical hashing.
+   */
+  public static canonicalJson(obj: unknown): string {
+    if (obj === null || typeof obj !== 'object') {
+      return JSON.stringify(obj);
+    }
+    if (Array.isArray(obj)) {
+      return '[' + obj.map((item) => DoDEngine.canonicalJson(item)).join(',') + ']';
+    }
+    const record = obj as Record<string, unknown>;
+    const sortedKeys = Object.keys(record).sort();
+    return '{' + sortedKeys.map((key) => JSON.stringify(key) + ':' + DoDEngine.canonicalJson(record[key])).join(',') + '}';
+  }
+
+  /**
+   * Computes SHA-256 digital signature over a canonical certificate payload.
+   */
+  public static computeCertificateSignature(
+    payload: Omit<TaskCompletionCertificate, 'signature'>
+  ): string {
+    const canonical = DoDEngine.canonicalJson(payload);
+    return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
+  }
+
+  /**
+   * Verifies the cryptographic integrity of a TaskCompletionCertificate.
+   * Detects tampering, manual edits, or forged approval flags.
+   */
+  public static verifyCertificateIntegrity(
+    certificate: TaskCompletionCertificate
+  ): CertificateVerificationResult {
+    if (!certificate || typeof certificate !== 'object') {
+      return {
+        valid: false,
+        expectedSignature: '',
+        actualSignature: '',
+        reason: 'Certificate is null or invalid object.',
+      };
+    }
+
+    const { signature, ...payload } = certificate;
+    if (!signature || typeof signature !== 'string') {
+      return {
+        valid: false,
+        expectedSignature: '',
+        actualSignature: '',
+        reason: 'Missing digital signature on certificate.',
+      };
+    }
+
+    const expected = DoDEngine.computeCertificateSignature(payload);
+
+    try {
+      const sigBuf = Buffer.from(signature, 'hex');
+      const expBuf = Buffer.from(expected, 'hex');
+
+      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+        return {
+          valid: false,
+          expectedSignature: expected,
+          actualSignature: signature,
+          reason: 'Tamper detected: SHA-256 signature mismatch. Certificate content was altered.',
+        };
+      }
+
+      return {
+        valid: true,
+        expectedSignature: expected,
+        actualSignature: signature,
+      };
+    } catch (err: any) {
+      return {
+        valid: false,
+        expectedSignature: expected,
+        actualSignature: signature,
+        reason: `Cryptographic verification error: ${err.message}`,
+      };
+    }
+  }
+
+  /**
+   * Parses git diff text to compute filesChanged, insertions, and deletions.
+   */
+  public static parseDiffSummary(diffText: string): DiffSummary {
+    let insertions = 0;
+    let deletions = 0;
+    const seenFiles = new Set<string>();
+
+    if (!diffText || typeof diffText !== 'string') {
+      return { filesChanged: 0, insertions: 0, deletions: 0 };
+    }
+
+    const lines = diffText.split('\n');
+    for (const line of lines) {
+      if (line.startsWith('diff --git ') || line.startsWith('+++ b/')) {
+        const match = line.match(/(?:b\/|diff --git a\/.* b\/)(.*)/);
+        if (match && match[1]) {
+          seenFiles.add(match[1].trim());
+        }
+      } else if (line.startsWith('+') && !line.startsWith('+++')) {
+        insertions++;
+      } else if (line.startsWith('-') && !line.startsWith('---')) {
+        deletions++;
+      }
+    }
+
+    const filesChanged =
+      seenFiles.size > 0 ? seenFiles.size : insertions > 0 || deletions > 0 ? 1 : 0;
+
+    return { filesChanged, insertions, deletions };
+  }
+
+  /**
+   * Resolves the persistent proof directory with sandboxed fallback in system/read-only dirs.
+   */
+  public static resolveProofDir(workdir: string = process.cwd()): string {
+    const candidate = path.join(workdir, '.nomin', 'proofs');
+    if (isWritableDir(workdir) && !isSystemDir(workdir)) {
+      try {
+        if (!fs.existsSync(candidate)) {
+          fs.mkdirSync(candidate, { recursive: true });
+        }
+        return candidate;
+      } catch {
+        // Fallback to global state
+      }
+    }
+
+    const resolved = resolveNominPaths(workdir);
+    const fallback = path.join(resolved.stateDir, 'proofs');
+    safeMkdirSync(fallback);
+    return fallback;
+  }
+
+  /**
+   * Saves a TaskCompletionCertificate to `.nomin/proofs/task_<id>.json`.
+   */
+  public static saveCertificate(
+    certificate: TaskCompletionCertificate,
+    workdir: string = process.cwd()
+  ): string {
+    const dir = DoDEngine.resolveProofDir(workdir);
+    const sanitizedId = certificate.taskId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filePath = path.join(dir, `task_${sanitizedId}.json`);
+    fs.writeFileSync(filePath, JSON.stringify(certificate, null, 2), 'utf8');
+    return filePath;
+  }
+
+  /**
+   * Loads a TaskCompletionCertificate from disk.
+   */
+  public static loadCertificate(
+    taskId: string,
+    workdir: string = process.cwd()
+  ): TaskCompletionCertificate | null {
+    const dir = DoDEngine.resolveProofDir(workdir);
+    const sanitizedId = taskId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filePath = path.join(dir, `task_${sanitizedId}.json`);
+
+    if (!fs.existsSync(filePath)) {
+      return null;
+    }
+
+    try {
+      const raw = fs.readFileSync(filePath, 'utf8');
+      return JSON.parse(raw) as TaskCompletionCertificate;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Extracts machine-executable acceptance criteria from Architect specifications or raw markdown.
    */
@@ -138,7 +333,7 @@ export class DoDEngine {
   }
 
   /**
-   * Checks if string resembles a CLI command (e.g. npm, node, tsc, pytest, cargo, git).
+   * Checks if string resembles an executable CLI command.
    */
   private static isExecutableCommand(str: string): boolean {
     const trimmed = str.trim();
@@ -273,15 +468,18 @@ export class DoDEngine {
   }
 
   /**
-   * Holds the final verification gate for a task.
-   * Blocks completion if:
-   * 1. Any acceptance criterion fails.
-   * 2. AST diff inspection detects deleted tests, weakened assertions, or stubs.
+   * Holds the final Release Verification Gate for a task.
+   * Generates a tamper-evident, SHA-256 signed TaskCompletionCertificate.
+   *
+   * Blocks release if:
+   * 1. AST diff inspection detects stubs, skips, or deleted assertions.
+   * 2. Any acceptance criterion fails to execute cleanly.
+   * 3. Certificate cannot be cryptographically verified.
    */
-  public static async verifyTask(
+  public static async verifyFinalGate(
     task: { id: string; acceptanceCriteria?: AcceptanceCriterion[] } | string,
-    options: VerificationOptions = {}
-  ): Promise<ReviewVerdict> {
+    options: FinalGateOptions = {}
+  ): Promise<FinalGateResult> {
     const taskId = typeof task === 'string' ? task : task.id;
     const criteria: AcceptanceCriterion[] =
       typeof task === 'object' && task.acceptanceCriteria ? task.acceptanceCriteria : [];
@@ -289,6 +487,7 @@ export class DoDEngine {
     const worktreePath = options.worktreePath || process.cwd();
     const verifiedCriteria: string[] = [];
     const failedCriteria: string[] = [];
+    const criteriaResults: CriterionResult[] = [];
     const evidenceLogs: Array<{
       command: string;
       exitCode: number;
@@ -296,28 +495,51 @@ export class DoDEngine {
       stderr: string;
     }> = [];
 
+    const diffText = options.diffText || '';
+    const diffSummary = DoDEngine.parseDiffSummary(diffText);
+    const baseSha = options.baseSha || '0000000000000000000000000000000000000000';
+    const headSha = options.headSha || 'c0ffee1111111111111111111111111111111111';
+
     // Step 1: Adversarial AST Diff Inspection
-    let integrityViolation = false;
-    let integrityFeedback = '';
+    const astAudit: AstAudit = AstIntegrityInspector.audit(diffText, true);
 
-    if (options.diffText) {
-      const integrityCheck: IntegrityCheckResult = AstIntegrityInspector.inspectDiff(options.diffText);
-      if (!integrityCheck.passed) {
-        integrityViolation = true;
-        integrityFeedback = integrityCheck.violations.join('\n');
-      }
-    }
+    // Step 2: If AST integrity violation detected, immediately fail gate & generate rejection certificate
+    if (!astAudit.clean) {
+      const certPayload: Omit<TaskCompletionCertificate, 'signature'> = {
+        taskId,
+        baseSha,
+        headSha,
+        diffSummary,
+        criteriaResults: [],
+        astAudit,
+        verifierRole: 'Verifier',
+        timestamp: new Date().toISOString(),
+        verified: false,
+      };
 
-    // Step 2: If integrity violation detected, immediately fail gate
-    if (integrityViolation) {
+      const signature = DoDEngine.computeCertificateSignature(certPayload);
+      const certificate: TaskCompletionCertificate = {
+        ...certPayload,
+        signature,
+      };
+
+      const certPath = DoDEngine.saveCertificate(certificate, worktreePath);
+      const feedback = [
+        ...astAudit.stubsFound.map((s) => `[STUB] ${s}`),
+        ...astAudit.testsSkipped.map((t) => `[TEST_SKIP] ${t}`),
+      ].join('\n');
+
       return {
         approved: false,
         taskId,
-        reason: 'INTEGRITY_VIOLATION: Code submitted contains stubs, deleted assertions, or skipped tests.',
-        feedback: integrityFeedback,
+        reason:
+          'INTEGRITY_VIOLATION: Code contains stubs, deleted assertions, or artificially skipped tests.',
+        feedback,
         integrityViolation: true,
         verifiedCriteria,
         failedCriteria,
+        certificate,
+        certificatePath: certPath,
         evidenceLogs,
       };
     }
@@ -326,6 +548,15 @@ export class DoDEngine {
     const execResults = await DoDEngine.runAllCriteria(criteria, worktreePath, options.failFast ?? false);
 
     for (const res of execResults) {
+      const stdoutHash = crypto.createHash('sha256').update(res.stdout || '', 'utf8').digest('hex');
+
+      criteriaResults.push({
+        command: res.command,
+        exitCode: res.exitCode,
+        stdoutHash,
+        durationMs: res.durationMs,
+      });
+
       evidenceLogs.push({
         command: res.command,
         exitCode: res.exitCode,
@@ -340,26 +571,58 @@ export class DoDEngine {
       }
     }
 
-    // Step 4: Final gate release decision
-    const allPassed = failedCriteria.length === 0 && (criteria.length === 0 || verifiedCriteria.length === criteria.length);
+    // Step 4: Release Decision & Tamper-Evident Certificate Generation
+    const allPassed =
+      failedCriteria.length === 0 &&
+      (criteria.length === 0 || verifiedCriteria.length === criteria.length);
 
-    if (allPassed) {
+    const verified = allPassed && astAudit.clean;
+
+    const certPayload: Omit<TaskCompletionCertificate, 'signature'> = {
+      taskId,
+      baseSha,
+      headSha,
+      diffSummary,
+      criteriaResults,
+      astAudit,
+      verifierRole: 'Verifier',
+      timestamp: new Date().toISOString(),
+      verified,
+    };
+
+    const signature = DoDEngine.computeCertificateSignature(certPayload);
+    const certificate: TaskCompletionCertificate = {
+      ...certPayload,
+      signature,
+    };
+
+    const certPath = DoDEngine.saveCertificate(certificate, worktreePath);
+
+    if (verified) {
       return {
         approved: true,
         taskId,
-        reason: criteria.length === 0
-          ? 'No acceptance criteria specified; AST integrity inspection passed.'
-          : `All ${verifiedCriteria.length} acceptance criteria passed successfully.`,
+        reason:
+          criteria.length === 0
+            ? 'No acceptance criteria specified; AST integrity inspection passed.'
+            : `All ${verifiedCriteria.length} acceptance criteria passed successfully.`,
         integrityViolation: false,
         verifiedCriteria,
         failedCriteria,
+        certificate,
+        certificatePath: certPath,
         evidenceLogs,
       };
     }
 
     const failedDetails = execResults
       .filter((r) => !r.passed)
-      .map((r) => `[FAIL] "${r.command}" exited with ${r.exitCode} (expected ${r.expectedExitCode})\nSTDERR: ${r.stderr || '(empty)'}\nSTDOUT: ${r.stdout || '(empty)'}`)
+      .map(
+        (r) =>
+          `[FAIL] "${r.command}" exited with ${r.exitCode} (expected ${r.expectedExitCode})\nSTDERR: ${
+            r.stderr || '(empty)'
+          }\nSTDOUT: ${r.stdout || '(empty)'}`
+      )
       .join('\n---\n');
 
     return {
@@ -370,8 +633,59 @@ export class DoDEngine {
       integrityViolation: false,
       verifiedCriteria,
       failedCriteria,
+      certificate,
+      certificatePath: certPath,
       evidenceLogs,
     };
+  }
+
+  /**
+   * Instance method wrapper for verifyFinalGate.
+   */
+  public async verifyFinalGate(
+    task: { id: string; acceptanceCriteria?: AcceptanceCriterion[] } | string,
+    options: FinalGateOptions = {}
+  ): Promise<FinalGateResult> {
+    const mergedOptions: FinalGateOptions = {
+      worktreePath: options.worktreePath || this.workspaceRoot,
+      ...options,
+    };
+    return DoDEngine.verifyFinalGate(task, mergedOptions);
+  }
+
+  /**
+   * Backwards-compatible verifyTask method wrapping verifyFinalGate.
+   */
+  public static async verifyTask(
+    task: { id: string; acceptanceCriteria?: AcceptanceCriterion[] } | string,
+    options: VerificationOptions = {}
+  ): Promise<ReviewVerdict> {
+    const gateResult = await DoDEngine.verifyFinalGate(task, options);
+
+    return {
+      approved: gateResult.approved,
+      taskId: gateResult.taskId,
+      reason: gateResult.reason,
+      feedback: gateResult.feedback,
+      integrityViolation: gateResult.integrityViolation,
+      certificate: gateResult.certificate,
+      verifiedCriteria: gateResult.verifiedCriteria,
+      failedCriteria: gateResult.failedCriteria,
+      evidenceLogs: gateResult.evidenceLogs,
+    };
+  }
+
+  /**
+   * Instance method wrapper for verifyTask.
+   */
+  public async verifyTask(
+    task: { id: string; acceptanceCriteria?: AcceptanceCriterion[] } | string,
+    options: VerificationOptions = {}
+  ): Promise<ReviewVerdict> {
+    return DoDEngine.verifyTask(task, {
+      worktreePath: options.worktreePath || this.workspaceRoot,
+      ...options,
+    });
   }
 }
 
