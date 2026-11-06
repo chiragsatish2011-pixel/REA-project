@@ -1,0 +1,9 @@
+
+  [38;5;203m[1m✖ Model Validation Failed: meta/llama2-70b[0m
+  [38;5;244mReason:[0m Upstream returned HTTP 410 Gone (Model deprecated by provider on 2026-08-26)
+
+  [38;5;111mRecommended Next Actions:[0m
+    • Type [38;5;215m/models[0m to choose from 85+ verified live models
+    • Or select active replacement: [38;5;114mmeta/llama-3.3-70b-instruct[0m
+
+  [2m(Press Enter to open /models or Esc to dismiss)[0m

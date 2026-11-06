@@ -1,0 +1,12 @@
+  [1m◈ SWARM TEAM COLLABORATION[0m  [2m(5 Autonomous Agents · Shared Blackboard & Mailbox)[0m
+
+  [38;5;244m[1] ARCHITECT [38;5;244m(idle)[0m  [38;5;238m│[0m  [38;5;215m[1m❯ [2] CODER [38;5;221m(running)[0m  [38;5;238m│[0m  [38;5;244m[3] TESTER [38;5;244m(waiting)[0m  [38;5;238m│[0m  [38;5;244m[4] REVIEWER [38;5;244m(idle)[0m  [38;5;238m│[0m  [38;5;244m[5] VERIFIER [38;5;244m(waiting)[0m
+  [38;5;244mActive Task (coder):[0m [37mImplement AES-256 keychain rotation in isolated worktree[0m
+
+  [38;5;240m┌── Shared Swarm Feed ────────────────────────────────────────────────────────┐[0m
+  [38;5;240m│[0m  [ARCHITECT] Task DAG published: 4 tasks with topological dependencies.    [38;5;240m│[0m
+  [38;5;240m│[0m  [CODER] Worktree ⎇ wt-task-02 checked out; applying multi-tier hunk edits. [38;5;240m│[0m
+  [38;5;240m│[0m  [TESTER] Preparing adversarial edge-case test suite for vault cipher.      [38;5;240m│[0m
+  [38;5;240m│[0m  [VERIFIER] DoD gates initialized: tsc --noEmit, npm test, zero stubs.      [38;5;240m│[0m
+  [38;5;240m└─────────────────────────────────────────────────────────────────────────────┘[0m
+  [38;5;244m[38;5;215m1-5[0m [38;5;244mfocus agent[0m  [38;5;238m·[0m  [38;5;215mtab[0m [38;5;244mcycle agents[0m  [38;5;238m·[0m  [38;5;215mesc[0m [38;5;244mreturn[0m[0m

@@ -1,0 +1,5 @@
+  [38;5;215m⚡ bash[0m [38;5;111mnpm test[0m  [2m(Running test suite)[0m
+    [38;5;114m✔[0m [38;5;244mbash[0m  [2m(14.20s)[0m  279 tests passed (14.2s)
+
+  [38;5;215m⚡ edit_file[0m [38;5;111msrc/auth/vault.ts[0m
+    [38;5;114m✔[0m [38;5;244medit_file[0m  [2m(0.04s)[0m  +14 -2 lines replaced

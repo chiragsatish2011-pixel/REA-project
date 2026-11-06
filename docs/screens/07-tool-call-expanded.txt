@@ -1,0 +1,10 @@
+  [38;5;215m⚡ Bash Execution (Expanded)[0m  [2m[tab to collapse][0m
+    [38;5;244mCommand:[0m   npm test -- tests/auth-keychain.test.ts
+    [38;5;244mWorkdir:[0m   C:\projects\my-app
+    [38;5;244mDuration:[0m  1.42s · Exit Code: 0
+    [38;5;240m┌── Output ────────────────────────────────────────┐[0m
+    [38;5;240m│[0m  ✔ encrypts and decrypts credentials losslessly   [38;5;240m│[0m
+    [38;5;240m│[0m  ✔ rejects tampered or corrupted ciphertext       [38;5;240m│[0m
+    [38;5;240m│[0m  ✔ stores, retrieves, and persists multiple keys  [38;5;240m│[0m
+    [38;5;240m│[0m  ℹ tests 18 · pass 18 · fail 0                    [38;5;240m│[0m
+    [38;5;240m└─── All test assertions passed ───────────────────┘[0m

@@ -1,0 +1,16 @@
+  [1mModel Selection[0m  [38;5;244m(NVIDIA NIM)[0m  [38;5;215m[1/8][0m
+  [38;5;244mFilter:[0m [38;5;215m[1m[ALL][0m  [38;5;244mchat[0m  [38;5;244mreasoning[0m  [38;5;244mtools[0m  [38;5;244mfavorites[0m  [38;5;244mrecent[0m
+  [38;5;244mSearch:[0m [37m[38;5;215m▋[0m
+  [38;5;244m [0m
+  [38;5;215m❯[0m [38;5;114m●[0m [38;5;221m★[0m [38;5;215m[1mmeta/llama-3.3-70b-instruct[0m  [38;5;244m128k · tools[0m
+      [38;5;221m★[0m [37mdeepseek-ai/deepseek-r1[0m  [38;5;244m128k · tools · reasoning[0m
+      [37mnvidia/llama-3.1-nemotron-70b-instruct[0m  [38;5;244m128k · tools · reasoning[0m
+      [37mqwen/qwen2.5-coder-32b-instruct[0m  [38;5;244m33k · tools[0m
+      [37mmistralai/codestral-22b-instruct-v0.1[0m  [38;5;244m33k · tools[0m
+      [37mgoogle/gemma-4-31b-it[0m  [38;5;244m128k · tools · reasoning[0m
+      [37mmeta/llama-3.2-90b-vision-instruct[0m  [38;5;244m128k · tools · vision[0m
+      [37mnvidia/cosmos-reason2-8b[0m  [38;5;244m33k · tools · reasoning[0m
+  [38;5;244m [0m
+  [38;5;238m──────────────────────────────────────────────────────────────────────────[0m
+  [38;5;244mSelected:[0m [1mmeta/llama-3.3-70b-instruct[0m  [38;5;238m│[0m  [38;5;244mContext:[0m 1,28,000 tokens  [38;5;238m│[0m  [38;5;244mTools:[0m Yes  [38;5;238m│[0m  [38;5;244mReasoning:[0m No
+  [38;5;244m[38;5;215m↑/↓[0m [38;5;244mmove[0m  [38;5;238m·[0m  [38;5;215menter[0m [38;5;244mselect[0m  [38;5;238m·[0m  [38;5;215mtype[0m [38;5;244mfilter[0m  [38;5;238m·[0m  [38;5;215mtab[0m [38;5;244mcycle filters[0m  [38;5;238m·[0m  [38;5;215mf[0m [38;5;244mfavorite[0m  [38;5;238m·[0m  [38;5;215mesc[0m [38;5;244mcancel[0m[0m

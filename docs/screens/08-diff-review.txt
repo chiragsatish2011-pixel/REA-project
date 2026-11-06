@@ -1,0 +1,10 @@
+  [1msrc/auth/vault.ts[0m  [38;5;114m+3[0m [38;5;203m-1[0m
+  [38;5;244m@@ -12,6 +12,8 @@[0m
+  [38;5;244m export class AuthVault {[0m
+  [38;5;114m+  private cipherKey: Buffer;[0m
+  [38;5;114m+  private rotationCounter: number = 0;[0m
+  [38;5;244m   [0m
+  [38;5;244m   public async encrypt(secret: string): Promise<string> {[0m
+  [38;5;203m-    return Buffer.from(secret).toString('base64');[0m
+  [38;5;114m+    return VaultCipher.encryptAES256GCM(secret, this.cipherKey);[0m
+  [38;5;244m   }[0m

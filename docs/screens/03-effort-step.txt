@@ -1,0 +1,5 @@
+  [1mConfigure Reasoning Effort & Thinking Budget (meta/llama-3.3-70b-instruct):[0m
+  [38;5;244moff[0m  [38;5;238m│[0m  [38;5;244mlow[0m  [38;5;238m│[0m  [38;5;215m[1m[ MEDIUM ][0m  [38;5;238m│[0m  [38;5;244mhigh[0m  [38;5;238m│[0m  [38;5;244mmax[0m
+  [2mBudget: 2,048 tokens (balanced, recommended)[0m
+
+  [38;5;244m[38;5;215m←/→[0m [38;5;244madjust[0m  [38;5;238m·[0m  [38;5;215menter[0m [38;5;244mconfirm[0m  [38;5;238m·[0m  [38;5;215mesc[0m [38;5;244mcancel[0m[0m

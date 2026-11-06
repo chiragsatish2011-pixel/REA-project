@@ -1,0 +1,8 @@
+
+  [1m[38;5;215m◈ NOMIN CODE[0m  [38;5;244mv1.0.0[0m  [2m— Model-Agnostic Autonomous Swarm[0m
+  [38;5;244mWorkspace:[0m C:\projects\my-app (main)  [38;5;240m·[0m  [38;5;244mProvider:[0m NVIDIA NIM
+  [38;5;244mModel:[0m [38;5;111mmeta/llama-3.3-70b-instruct[0m  [38;5;240m·[0m  [38;5;244mEffort:[0m [38;5;114mMEDIUM[0m  [38;5;240m·[0m  [38;5;244mMode:[0m SOLO
+
+  [38;5;215m[NIM][0m [37mmeta/llama-3.3-70b-instruct[0m [38;5;238m│[0m [38;5;111meffort:medium[0m [38;5;238m│[0m [38;5;244mnormal mode[0m [38;5;238m│[0m [38;5;244mmy-app (main)[0m [38;5;238m│[0m [38;5;244m120 rpm[0m
+  [38;5;244m[38;5;215m/[0m [38;5;244mcommands[0m  [38;5;238m·[0m  [38;5;215m@[0m [38;5;244mmention file[0m  [38;5;238m·[0m  [38;5;215m![0m [38;5;244mshell[0m  [38;5;238m·[0m  [38;5;215m^R[0m [38;5;244mhistory[0m  [38;5;238m·[0m  [38;5;215mshift+tab[0m [38;5;244mnormal mode[0m  [38;5;238m·[0m  [38;5;215mesc[0m [38;5;244minterrupt[0m[0m
+  [38;5;215m❯[0m 

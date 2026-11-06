@@ -1,0 +1,10 @@
+  [38;5;215m[1mCommands matching '/m'[0m[38;5;244m (1 of 26)[0m
+  [38;5;215m❯[0m [38;5;215m[1m/model        [0m [38;5;244m[Provider & Models][0m [38;5;244mInteractive arrow-key model switcher[0m
+    [37m/models       [0m [38;5;244m[Provider & Models][0m [38;5;244mOpen live model catalog browser[0m
+    [37m/mode         [0m [38;5;244m[Swarm][0m [38;5;244mSwitch between SOLO (1 agent) and TEAM (multi-agent) mode[0m
+    [37m/mcp          [0m [38;5;244m[Tools & Diagnostics][0m [38;5;244mConfigure Model Context Protocol servers[0m
+    [37m/memory       [0m [38;5;244m[Core][0m [38;5;244mView or edit workspace memory guidelines[0m
+    [37m/team         [0m [38;5;244m[Swarm][0m [38;5;244mAssign models to swarm roles (architect, coder, tester, verifier)[0m
+    [37m/compact      [0m [38;5;244m[Swarm][0m [38;5;244mProactively compact context window[0m
+    [37m/permissions  [0m [38;5;244m[Core][0m [38;5;244mInteractive permission rule editor & policy manager[0m
+  [38;5;244m[38;5;215m↑/↓[0m [38;5;244mnavigate[0m  [38;5;238m·[0m  [38;5;215menter/tab[0m [38;5;244mcomplete[0m  [38;5;238m·[0m  [38;5;215mesc[0m [38;5;244mdismiss[0m[0m
