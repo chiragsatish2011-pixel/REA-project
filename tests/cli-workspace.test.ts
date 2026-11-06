@@ -103,13 +103,18 @@ describe('CLI & Dynamic Directory Switching', () => {
       // Switch to target directory
       await repl.handleDirectorySwitch(targetDir);
 
-      assert.strictEqual(path.resolve(configManager.getConfig().workdir), path.resolve(targetDir));
-      assert.strictEqual(path.resolve(coordinator.getWorkspaceRoot()), path.resolve(targetDir));
+      const canonical = (p: string) =>
+        process.platform === 'win32' && fs.realpathSync.native
+          ? fs.realpathSync.native(p).toLowerCase()
+          : path.resolve(p).toLowerCase();
+
+      assert.strictEqual(canonical(configManager.getConfig().workdir), canonical(targetDir));
+      assert.strictEqual(canonical(coordinator.getWorkspaceRoot()), canonical(targetDir));
 
       // Attempt to switch to non-existent directory (should fail gracefully and keep current)
       const fakeDir = path.join(os.tmpdir(), 'non-existent-nomin-dir-12345');
       await repl.handleDirectorySwitch(fakeDir);
-      assert.strictEqual(path.resolve(configManager.getConfig().workdir), path.resolve(targetDir));
+      assert.strictEqual(canonical(configManager.getConfig().workdir), canonical(targetDir));
     } finally {
       try {
         process.chdir(originalCwd);
