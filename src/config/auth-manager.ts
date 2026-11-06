@@ -11,8 +11,6 @@
  * - `nomin auth limits <label|id> --rpm <n> --tpm <n> --concurrency <n>`: live limit update.
  */
 
-import * as http from 'node:http';
-import * as https from 'node:https';
 import { URL } from 'node:url';
 import { NominKeyStore, StoredCredential, ProviderLimits, RedactionEngine } from './keychain.js';
 import { ConfigManager } from './index.js';
@@ -351,51 +349,13 @@ export class NominAuthManager {
   }
 
   /**
-   * Pure Node.js HTTP/HTTPS helper.
+   * Pure Node.js HTTP/HTTPS helper routed through NominHttpClient transport.
    */
   private httpRequest(
     url: URL,
     method: string,
     headers: Record<string, string>
   ): Promise<{ status: number; body: string; resHeaders: Record<string, string> }> {
-    return new Promise((resolve, reject) => {
-      const isHttps = url.protocol === 'https:';
-      const requestModule = isHttps ? https : http;
-
-      const req = requestModule.request(
-        {
-          protocol: url.protocol,
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: `${url.pathname}${url.search}`,
-          method,
-          headers,
-          timeout: 10000,
-        },
-        res => {
-          let body = '';
-          res.setEncoding('utf8');
-          res.on('data', chunk => { body += chunk; });
-          res.on('end', () => {
-            const resHeaders: Record<string, string> = {};
-            for (const [k, v] of Object.entries(res.headers)) {
-              if (typeof v === 'string') resHeaders[k.toLowerCase()] = v;
-              else if (Array.isArray(v)) resHeaders[k.toLowerCase()] = v.join(', ');
-            }
-            resolve({
-              status: res.statusCode || 500,
-              body,
-              resHeaders,
-            });
-          });
-        }
-      );
-
-      req.on('error', err => reject(err));
-      req.on('timeout', () => {
-        req.destroy(new Error('Request timed out'));
-      });
-      req.end();
-    });
+    return NominHttpClient.rawHttpRequest(url, { method, headers });
   }
 }

@@ -66,9 +66,9 @@ export class RedactionEngine {
   private static registeredSecrets: Set<string> = new Set();
 
   private static defaultPatterns: RedactionRule[] = [
-    { pattern: /nvapi-[A-Za-z0-9_-]{32,}/g, replacement: '[REDACTED_NVIDIA_API_KEY]' },
-    { pattern: /sk-ant-[A-Za-z0-9_-]{32,}/g, replacement: '[REDACTED_ANTHROPIC_KEY]' },
-    { pattern: /sk-[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED_OPENAI_KEY]' },
+    { pattern: /nvapi-[A-Za-z0-9_-]{10,}/g, replacement: '[REDACTED_NVIDIA_API_KEY]' },
+    { pattern: /sk-ant-[A-Za-z0-9_-]{10,}/g, replacement: '[REDACTED_ANTHROPIC_KEY]' },
+    { pattern: /sk-[A-Za-z0-9_-]{10,}/g, replacement: '[REDACTED_OPENAI_KEY]' },
     { pattern: /AIzaSy[A-Za-z0-9_-]{33}/g, replacement: '[REDACTED_GEMINI_KEY]' },
     { pattern: /Bearer\s+([A-Za-z0-9._-]{24,})/gi, replacement: 'Bearer [REDACTED_TOKEN]' },
     { pattern: /"apiKey"\s*:\s*"([^"]+)"/g, replacement: '"apiKey": "[REDACTED]"' },

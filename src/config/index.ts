@@ -8,6 +8,9 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import type { ReasoningEffort } from '../provider/types.js';
+import { ModelCatalogManager } from '../provider/model-catalog.js';
 
 export type SwarmMode = 'solo' | 'team';
 
@@ -30,6 +33,7 @@ export interface NominConfig {
   activeModel?: string;
   selectedModels: string[];
   roles: RoleModelConfig;
+  reasoningEffort?: ReasoningEffort;
   activeProvider: string;
   providers: Record<string, ProviderEndpointConfig>;
   workdir: string;
@@ -43,9 +47,63 @@ export interface NominConfig {
   isSystemDir?: boolean;
   isFallbackState?: boolean;
   globalConfigDir?: string;
+  modelSettings?: Record<string, any>;
+  fallbackChains?: Record<string, string[]>;
+  favorites?: string[];
+  recentlyUsed?: string[];
+  retiredModels?: Record<string, string>;
+  autoApprovePermissions?: boolean;
+  planMode?: boolean;
 }
 
 const DEFAULT_NIM_BASE_URL = 'https://integrate.api.nvidia.com/v1';
+
+/**
+ * Resolves the root installation directory of the Nomin Code package.
+ */
+export function findInstallRootDir(): string {
+  try {
+    let current = path.dirname(fileURLToPath(import.meta.url));
+    while (current && current !== path.dirname(current)) {
+      if (fs.existsSync(path.join(current, 'package.json'))) {
+        return current;
+      }
+      current = path.dirname(current);
+    }
+  } catch (_) {}
+  return path.resolve('.');
+}
+
+/**
+ * Sanitizes an API key string by stripping accidental quotes, whitespace, \r\n, and Bearer prefix.
+ */
+export function sanitizeApiKey(rawKey?: string): string {
+  if (!rawKey) return '';
+  return rawKey
+    .trim()
+    .replace(/^Bearer\s+/i, '')
+    .replace(/^["']|["']$/g, '')
+    .replace(/[\r\n]+/g, '')
+    .trim();
+}
+
+/**
+ * Masks an API key for safe user display (e.g. nvapi-abcd...wxyz or NONE FOUND).
+ */
+export function maskApiKey(key?: string): string {
+  if (!key) return 'NONE FOUND';
+  const clean = sanitizeApiKey(key);
+  if (!clean) return 'NONE FOUND';
+  if (clean.length <= 8) return '••••••••';
+  const prefixLen = clean.startsWith('nvapi-') ? 10 : 8;
+  return `${clean.slice(0, prefixLen)}...${clean.slice(-4)}`;
+}
+
+export interface ResolvedApiKeyInfo {
+  apiKey: string;
+  source: string;
+  masked: string;
+}
 
 /**
  * Checks whether a given directory (or its closest ancestor if non-existent) is writable.
@@ -188,6 +246,145 @@ export function isSystemDir(dir: string): boolean {
 export const isSystemDirectory = isSystemDir;
 
 /**
+ * Checks whether a directory is the user's home directory.
+ */
+export function isHomeDir(dir: string): boolean {
+  try {
+    const resolved = path.resolve(dir);
+    const home = path.resolve(os.homedir());
+    return resolved.toLowerCase() === home.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks whether a directory is a drive root (e.g. C:\ or /).
+ */
+export function isDriveRootDir(dir: string): boolean {
+  try {
+    const resolved = path.resolve(dir);
+    const parsed = path.parse(resolved);
+    return resolved.toLowerCase() === parsed.root.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+export interface WorkspaceSafetyAudit {
+  isProject: boolean;
+  isHome: boolean;
+  isDriveRoot: boolean;
+  isSystemDir: boolean;
+  projectMarkers: string[];
+  warning?: string;
+}
+
+/**
+ * Inspects a directory to determine whether it is a legitimate project workspace
+ * versus a user home directory, drive root, or system path.
+ */
+export function detectWorkspaceProject(dir: string): WorkspaceSafetyAudit {
+  const isHome = isHomeDir(dir);
+  const isDriveRoot = isDriveRootDir(dir);
+  const isSys = isSystemDir(dir);
+
+  const markers = [
+    '.git',
+    'package.json',
+    'Cargo.toml',
+    'go.mod',
+    'pyproject.toml',
+    'requirements.txt',
+    'setup.py',
+    'pom.xml',
+    'build.gradle',
+    'Makefile',
+    'CMakeLists.txt',
+    'composer.json',
+    'tsconfig.json',
+  ];
+
+  const foundMarkers: string[] = [];
+  try {
+    if (fs.existsSync(dir)) {
+      for (const m of markers) {
+        if (fs.existsSync(path.join(dir, m))) {
+          foundMarkers.push(m);
+        }
+      }
+    }
+  } catch (_) {}
+
+  // A folder is considered a valid project if it has project markers AND is not a system/home root
+  const isProject = foundMarkers.length > 0 && !isSys && !isDriveRoot && !isHome;
+
+  let warning: string | undefined;
+  if (isHome) {
+    warning = 'Current workspace is your user home directory (~). Automated indexing and destructive edits are paused for safety. Use /cd <path> to open a project repo.';
+  } else if (isSys || isDriveRoot) {
+    warning = 'Current workspace is a system or drive root. Direct modifications and automated indexing are blocked for safety. Use /cd to switch to a project directory.';
+  } else if (!isProject) {
+    warning = 'Directory does not contain standard project manifests (.git, package.json, pyproject.toml, Cargo.toml). RepoMap disabled until a project is opened.';
+  }
+
+  return {
+    isProject,
+    isHome,
+    isDriveRoot,
+    isSystemDir: isSys,
+    projectMarkers: foundMarkers,
+    warning,
+  };
+}
+
+/**
+ * Validates whether a model identifier is compatible with a given provider.
+ * Prevents carrying model IDs across incompatible providers (e.g. NIM meta/llama model to OpenAI).
+ */
+export function validateModelProviderMatch(providerId: string, modelId?: string): { valid: boolean; error?: string } {
+  if (!modelId) {
+    return { valid: true };
+  }
+
+  const p = (providerId || '').toLowerCase();
+  const m = modelId.trim();
+
+  if (p === 'openai') {
+    // OpenAI models do NOT contain organization prefixes like meta/, nvidia/, mistralai/, deepseek-ai/, qwen/
+    if (m.includes('/') && !m.startsWith('openai/')) {
+      return {
+        valid: false,
+        error: `Model '${m}' is not an OpenAI model. It appears to belong to another provider. Please pick an OpenAI model or switch provider via /provider.`,
+      };
+    }
+  } else if (p === 'nim') {
+    if (m.toLowerCase().startsWith('gpt-') || m.toLowerCase().startsWith('o1') || m.toLowerCase().startsWith('o3')) {
+      return {
+        valid: false,
+        error: `Model '${m}' is an OpenAI model and is not available on NVIDIA NIM. Use a NIM-hosted model or switch provider to OpenAI.`,
+      };
+    }
+  } else if (p === 'anthropic') {
+    if (!m.toLowerCase().startsWith('claude')) {
+      return {
+        valid: false,
+        error: `Model '${m}' is not an Anthropic model. Anthropic requires a Claude model.`,
+      };
+    }
+  } else if (p === 'deepseek') {
+    if (!m.toLowerCase().startsWith('deepseek')) {
+      return {
+        valid: false,
+        error: `Model '${m}' is not a DeepSeek model. DeepSeek Official API requires a DeepSeek model.`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
  * Computes a safe, deterministic slug and hash for a workspace path.
  */
 export function hashOrSlug(inputPath: string): string {
@@ -267,7 +464,7 @@ export function resolveNominPaths(workdir: string): ResolvedNominPaths {
   const isSys = isSystemDir(workdir);
   const isWritable = isWritableDir(workdir);
 
-  const globalConfigDir = path.join(os.homedir(), '.nomin');
+  const globalConfigDir = process.env.NOMIN_GLOBAL_DIR || path.join(os.homedir(), '.nomin');
   safeMkdirSync(globalConfigDir);
 
   // If workdir is writable and NOT a system directory, keep metadata inside workdir/.nomin
@@ -357,6 +554,14 @@ export class ConfigManager {
     ConfigManager.instance = undefined as any;
   }
 
+  public static sanitizeApiKey(key?: string): string {
+    return sanitizeApiKey(key);
+  }
+
+  public static maskApiKey(key?: string): string {
+    return maskApiKey(key);
+  }
+
   public getConfig(): NominConfig {
     return this.config;
   }
@@ -378,8 +583,13 @@ export class ConfigManager {
   }
 
   public setSoloModel(modelId: string): void {
-    this.addModel(modelId);
-    this.updateConfig({ mode: 'solo', activeModel: modelId });
+    const trimmed = modelId.trim();
+    const match = validateModelProviderMatch(this.config.activeProvider, trimmed);
+    if (!match.valid) {
+      throw new Error(match.error);
+    }
+    this.addModel(trimmed);
+    this.updateConfig({ mode: 'solo', activeModel: trimmed });
     this.saveGlobalConfig();
   }
 
@@ -434,6 +644,12 @@ export class ConfigManager {
         activeProvider: this.config.activeProvider,
         providers: this.config.providers,
         roles: this.config.roles,
+        reasoningEffort: this.config.reasoningEffort,
+        modelSettings: this.config.modelSettings || {},
+        fallbackChains: this.config.fallbackChains || {},
+        favorites: this.config.favorites || [],
+        recentlyUsed: this.config.recentlyUsed || [],
+        retiredModels: this.config.retiredModels || {},
         maxTurnPerSubtask: this.config.maxTurnPerSubtask,
         enableDoDGate: this.config.enableDoDGate,
         enableTodoGate: this.config.enableTodoGate,
@@ -446,12 +662,254 @@ export class ConfigManager {
     }
   }
 
+  public markModelRetired(modelId: string, reason: string): void {
+    const trimmed = modelId.trim();
+    const retiredModels = { ...(this.config.retiredModels || {}), [trimmed]: reason };
+    this.updateConfig({ retiredModels });
+    this.saveGlobalConfig();
+  }
+
+  public isModelRetired(modelId: string): boolean {
+    return Boolean(this.config.retiredModels?.[modelId.trim()]);
+  }
+
+  public getModelSettings(modelId?: string): any {
+    const target = (modelId || this.config.activeModel || '').trim();
+    if (!target) return undefined;
+    return this.config.modelSettings?.[target];
+  }
+
+  public setModelSettings(modelId: string, settings: any): void {
+    const target = modelId.trim();
+    const current = this.config.modelSettings?.[target] || { modelId: target, providerId: this.config.activeProvider };
+    const updated = { ...current, ...settings };
+    const modelSettings = { ...(this.config.modelSettings || {}), [target]: updated };
+    this.updateConfig({ modelSettings });
+    this.saveGlobalConfig();
+  }
+
+  public getFallbackChain(modelId?: string): string[] {
+    const target = (modelId || this.config.activeModel || '').trim();
+    return this.config.fallbackChains?.[target] || [];
+  }
+
+  public setFallbackChain(modelId: string, fallbacks: string[]): void {
+    const target = modelId.trim();
+    const fallbackChains = { ...(this.config.fallbackChains || {}), [target]: fallbacks };
+    this.updateConfig({ fallbackChains });
+    this.saveGlobalConfig();
+  }
+
+  public addFavorite(modelId: string): void {
+    const target = modelId.trim();
+    const current = new Set(this.config.favorites || []);
+    current.add(target);
+    this.updateConfig({ favorites: Array.from(current) });
+    this.saveGlobalConfig();
+  }
+
+  public removeFavorite(modelId: string): void {
+    const target = modelId.trim();
+    const favorites = (this.config.favorites || []).filter(m => m !== target);
+    this.updateConfig({ favorites });
+    this.saveGlobalConfig();
+  }
+
+  public recordRecentlyUsed(modelId: string): void {
+    const target = modelId.trim();
+    if (!target) return;
+    const existing = (this.config.recentlyUsed || []).filter(m => m !== target);
+    existing.unshift(target);
+    if (existing.length > 20) existing.pop();
+    this.updateConfig({ recentlyUsed: existing });
+    this.saveGlobalConfig();
+  }
+
+  public setActiveModel(modelId: string): void {
+    const trimmed = modelId.trim();
+    this.updateConfig({ activeModel: trimmed });
+    this.recordRecentlyUsed(trimmed);
+    this.saveGlobalConfig();
+  }
+
+  public getProviderKeyInfo(providerId?: string): ResolvedApiKeyInfo {
+    const pid = (providerId || this.config.activeProvider || 'nim').toLowerCase();
+    const globalDir = this.config.globalConfigDir || path.join(os.homedir(), '.nomin');
+    const globalConfigPath = path.join(globalDir, 'config.json');
+
+    // 1. Check ~/.nomin/config.json
+    try {
+      if (fs.existsSync(globalConfigPath)) {
+        const parsed = JSON.parse(fs.readFileSync(globalConfigPath, 'utf8'));
+        const key = sanitizeApiKey(parsed.providers?.[pid]?.apiKey);
+        if (key) {
+          return {
+            apiKey: key,
+            source: path.join(os.homedir(), '.nomin', 'config.json'),
+            masked: maskApiKey(key),
+          };
+        }
+      }
+    } catch (_) {}
+
+    // 2. Check runtime in-memory config
+    const inMemKey = sanitizeApiKey(this.config.providers?.[pid]?.apiKey);
+    if (inMemKey) {
+      return {
+        apiKey: inMemKey,
+        source: 'runtime active config',
+        masked: maskApiKey(inMemKey),
+      };
+    }
+
+    // 3. Check environment variables in priority order
+    if (pid === 'nim' || pid === 'nvidia') {
+      const nimKeys = [
+        { name: 'NVIDIA_NIM_API_KEY', val: process.env.NVIDIA_NIM_API_KEY },
+        { name: 'NIM_API_KEY', val: process.env.NIM_API_KEY },
+        { name: 'NVIDIA_API_KEY', val: process.env.NVIDIA_API_KEY },
+      ];
+      for (const k of nimKeys) {
+        const clean = sanitizeApiKey(k.val);
+        if (clean) {
+          return {
+            apiKey: clean,
+            source: `environment variable (${k.name})`,
+            masked: maskApiKey(clean),
+          };
+        }
+      }
+    } else if (pid === 'openai') {
+      const clean = sanitizeApiKey(process.env.OPENAI_API_KEY);
+      if (clean) return { apiKey: clean, source: 'environment variable (OPENAI_API_KEY)', masked: maskApiKey(clean) };
+    } else if (pid === 'anthropic') {
+      const clean = sanitizeApiKey(process.env.ANTHROPIC_API_KEY);
+      if (clean) return { apiKey: clean, source: 'environment variable (ANTHROPIC_API_KEY)', masked: maskApiKey(clean) };
+    } else if (pid === 'deepseek') {
+      const clean = sanitizeApiKey(process.env.DEEPSEEK_API_KEY);
+      if (clean) return { apiKey: clean, source: 'environment variable (DEEPSEEK_API_KEY)', masked: maskApiKey(clean) };
+    } else if (pid === 'openrouter') {
+      const clean = sanitizeApiKey(process.env.OPENROUTER_API_KEY);
+      if (clean) return { apiKey: clean, source: 'environment variable (OPENROUTER_API_KEY)', masked: maskApiKey(clean) };
+    } else if (pid === 'groq') {
+      const clean = sanitizeApiKey(process.env.GROQ_API_KEY);
+      if (clean) return { apiKey: clean, source: 'environment variable (GROQ_API_KEY)', masked: maskApiKey(clean) };
+    }
+
+    // 4. Check installation directory .env
+    const installRoot = findInstallRootDir();
+    if (installRoot) {
+      const installEnv = path.join(installRoot, '.env');
+      if (fs.existsSync(installEnv)) {
+        try {
+          const content = fs.readFileSync(installEnv, 'utf8');
+          for (const line of content.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx > 0) {
+              const varName = trimmed.substring(0, eqIdx).trim();
+              const varVal = sanitizeApiKey(trimmed.substring(eqIdx + 1).trim());
+              if (
+                (pid === 'nim' && (varName === 'NVIDIA_NIM_API_KEY' || varName === 'NIM_API_KEY' || varName === 'NVIDIA_API_KEY')) ||
+                (pid === 'openai' && varName === 'OPENAI_API_KEY') ||
+                (pid === 'anthropic' && varName === 'ANTHROPIC_API_KEY') ||
+                (pid === 'deepseek' && varName === 'DEEPSEEK_API_KEY')
+              ) {
+                if (varVal) {
+                  return { apiKey: varVal, source: `${path.basename(installRoot)}/.env`, masked: maskApiKey(varVal) };
+                }
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    return {
+      apiKey: '',
+      source: 'NONE FOUND',
+      masked: 'NONE FOUND',
+    };
+  }
+
+  public setActiveProvider(providerId: string, customConfig?: Partial<ProviderEndpointConfig>): void {
+    const existing = this.config.providers[providerId] || {
+      id: providerId,
+      name: providerId.toUpperCase(),
+      baseUrl: 'http://localhost:8000/v1',
+      defaultRpm: 60,
+      defaultTpm: 100000,
+      defaultConcurrency: 4,
+    };
+
+    const updatedProvider = { ...existing, ...customConfig };
+    const providers = { ...this.config.providers, [providerId]: updatedProvider };
+
+    // Clear activeModel if incompatible with new provider (never carry invalid models across providers)
+    let activeModel = this.config.activeModel;
+    if (activeModel && !validateModelProviderMatch(providerId, activeModel).valid) {
+      activeModel = undefined;
+    }
+
+    this.updateConfig({ activeProvider: providerId, providers, activeModel });
+    this.saveGlobalConfig();
+  }
+
+  public setProviderApiKey(providerId: string, apiKey: string): void {
+    const cleanKey = apiKey.trim().replace(/^Bearer\s+/i, '').replace(/^["']|["']$/g, '');
+    const existing = this.config.providers[providerId] || {
+      id: providerId,
+      name: providerId.toUpperCase(),
+      baseUrl: 'https://integrate.api.nvidia.com/v1',
+      defaultRpm: 60,
+      defaultTpm: 100000,
+      defaultConcurrency: 4,
+    };
+    existing.apiKey = cleanKey;
+    this.updateConfig({ providers: { ...this.config.providers, [providerId]: existing } });
+    this.saveGlobalConfig();
+  }
+
+  public setProviderBaseUrl(providerId: string, baseUrl: string): void {
+    const existing = this.config.providers[providerId];
+    if (existing) {
+      existing.baseUrl = baseUrl.trim();
+      this.updateConfig({ providers: { ...this.config.providers, [providerId]: existing } });
+      this.saveGlobalConfig();
+    }
+  }
+
+  public getReasoningEffort(): ReasoningEffort {
+    return this.config.reasoningEffort || 'medium';
+  }
+
+  public setReasoningEffort(effort: ReasoningEffort): void {
+    this.updateConfig({ reasoningEffort: effort });
+    this.saveGlobalConfig();
+  }
+
+  public getPopularModelsForProvider(providerId?: string): string[] {
+    const p = (providerId || this.config.activeProvider || 'nim').toLowerCase();
+    return ModelCatalogManager.getPopularAlivePresets(p);
+  }
+
   private loadConfig(workdir: string): NominConfig {
-    // 1. Load from environment variables (.env in workspace, and ~/.nomin/.env)
-    this.loadDotEnv(workdir);
+    // 1. Load from environment variables (.env in install dir, ~/.nomin/.env, and workspace)
+    // Priority: ~/.nomin/.env and workspace, but always fallback to install root .env
+    const installRoot = findInstallRootDir();
+    if (installRoot) {
+      const installEnv = path.join(installRoot, '.env');
+      if (fs.existsSync(installEnv)) {
+        this.loadEnvFromFile(installEnv);
+      }
+    }
     const globalEnvPath = path.join(os.homedir(), '.nomin', '.env');
     if (fs.existsSync(globalEnvPath)) {
       this.loadEnvFromFile(globalEnvPath);
+    }
+    if (!isSystemDir(workdir)) {
+      this.loadDotEnv(workdir);
     }
 
     // 2. Resolve resilient paths
@@ -487,17 +945,39 @@ export class ConfigManager {
       ...(localFileConfig.roles || {}),
     };
 
-    const fileProviders: Record<string, ProviderEndpointConfig> = {
-      ...(globalFileConfig.providers || {}),
-      ...(localFileConfig.providers || {}),
+    // Strict priority resolution for provider API keys:
+    // 1. ~/.nomin/config.json (user's explicit /key or /auth)
+    // 2. Process environment variables (NVIDIA_NIM_API_KEY, NIM_API_KEY, NVIDIA_API_KEY, etc.)
+    // 3. Workspace local config or install directory .env
+    const resolveInitialKey = (providerId: string, envKeys: (string | undefined)[]): string => {
+      const globalKey = sanitizeApiKey(globalFileConfig.providers?.[providerId]?.apiKey);
+      if (globalKey) return globalKey;
+      for (const envVal of envKeys) {
+        const clean = sanitizeApiKey(envVal);
+        if (clean) return clean;
+      }
+      const localKey = sanitizeApiKey(localFileConfig.providers?.[providerId]?.apiKey);
+      if (localKey) return localKey;
+      return '';
     };
+
+    const nimKey = resolveInitialKey('nim', [
+      process.env.NVIDIA_NIM_API_KEY,
+      process.env.NIM_API_KEY,
+      process.env.NVIDIA_API_KEY,
+    ]);
+    const openAiKey = resolveInitialKey('openai', [process.env.OPENAI_API_KEY]);
+    const deepseekKey = resolveInitialKey('deepseek', [process.env.DEEPSEEK_API_KEY]);
+    const anthropicKey = resolveInitialKey('anthropic', [process.env.ANTHROPIC_API_KEY]);
+    const openrouterKey = resolveInitialKey('openrouter', [process.env.OPENROUTER_API_KEY]);
+    const groqKey = resolveInitialKey('groq', [process.env.GROQ_API_KEY]);
 
     const defaultProviders: Record<string, ProviderEndpointConfig> = {
       nim: {
         id: 'nim',
         name: 'NVIDIA NIM',
         baseUrl: process.env.NVIDIA_BASE_URL || DEFAULT_NIM_BASE_URL,
-        apiKey: process.env.NVIDIA_API_KEY || process.env.NIM_API_KEY || '',
+        apiKey: nimKey,
         defaultRpm: 30,
         defaultTpm: 60000,
         defaultConcurrency: 4,
@@ -506,7 +986,7 @@ export class ConfigManager {
         id: 'openai',
         name: 'OpenAI API',
         baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-        apiKey: process.env.OPENAI_API_KEY || '',
+        apiKey: openAiKey,
         defaultRpm: 60,
         defaultTpm: 150000,
         defaultConcurrency: 8,
@@ -515,7 +995,7 @@ export class ConfigManager {
         id: 'deepseek',
         name: 'DeepSeek Official API',
         baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
-        apiKey: process.env.DEEPSEEK_API_KEY || '',
+        apiKey: deepseekKey,
         defaultRpm: 60,
         defaultTpm: 100000,
         defaultConcurrency: 5,
@@ -538,17 +1018,64 @@ export class ConfigManager {
         defaultTpm: 500000,
         defaultConcurrency: 4,
       },
+      anthropic: {
+        id: 'anthropic',
+        name: 'Anthropic Claude API',
+        baseUrl: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1',
+        apiKey: anthropicKey,
+        defaultRpm: 50,
+        defaultTpm: 100000,
+        defaultConcurrency: 4,
+      },
+      openrouter: {
+        id: 'openrouter',
+        name: 'OpenRouter AI Gateway',
+        baseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+        apiKey: openrouterKey,
+        defaultRpm: 60,
+        defaultTpm: 200000,
+        defaultConcurrency: 6,
+      },
+      groq: {
+        id: 'groq',
+        name: 'Groq LPU Cloud',
+        baseUrl: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+        apiKey: groqKey,
+        defaultRpm: 30,
+        defaultTpm: 30000,
+        defaultConcurrency: 4,
+      },
     };
+
+    const fileProviders: Record<string, ProviderEndpointConfig> = {
+      ...(globalFileConfig.providers || {}),
+      ...(localFileConfig.providers || {}),
+    };
+
+    // Merge providers and guarantee apiKey is sanitized and non-empty if default resolved one
+    const mergedProviders: Record<string, ProviderEndpointConfig> = { ...defaultProviders };
+    for (const [pId, pCfg] of Object.entries(fileProviders)) {
+      mergedProviders[pId] = {
+        ...defaultProviders[pId],
+        ...pCfg,
+        apiKey: sanitizeApiKey(pCfg.apiKey) || defaultProviders[pId]?.apiKey || '',
+      };
+    }
 
     const activeProvider = process.env.NOMIN_PROVIDER || 
       localFileConfig.activeProvider ||
       globalFileConfig.activeProvider ||
-      (process.env.NVIDIA_API_KEY ? 'nim' : 
-       process.env.DEEPSEEK_API_KEY ? 'deepseek' : 
-       process.env.OPENAI_API_KEY ? 'openai' : 'nim');
+      (nimKey ? 'nim' : 
+       deepseekKey ? 'deepseek' : 
+       openAiKey ? 'openai' : 'nim');
 
     // User-controlled mode (default: solo)
     const mode: SwarmMode = (localFileConfig.mode || globalFileConfig.mode || 'solo') as SwarmMode;
+
+    const retiredMap: Record<string, string> = {
+      ...(globalFileConfig.retiredModels || {}),
+      ...(localFileConfig.retiredModels || {}),
+    };
 
     // User-selected models pool (NO built-in or hardcoded models)
     const selectedModels: string[] = Array.from(new Set([
@@ -556,10 +1083,18 @@ export class ConfigManager {
       ...(localFileConfig.selectedModels || []),
     ]));
 
-    const activeModel: string | undefined = process.env.NOMIN_MODEL ||
-      localFileConfig.activeModel ||
-      globalFileConfig.activeModel ||
-      (selectedModels.length > 0 ? selectedModels[0] : undefined);
+    const nonRetiredSelected = selectedModels.filter(m => !retiredMap[m]);
+
+    const rawSavedModel = process.env.NOMIN_MODEL || localFileConfig.activeModel || globalFileConfig.activeModel;
+    const cleanSavedModel = (rawSavedModel && rawSavedModel !== 'undefined' && rawSavedModel !== 'none') ? rawSavedModel : undefined;
+
+    let activeModel: string | undefined = cleanSavedModel ||
+      (nonRetiredSelected.length > 0 ? nonRetiredSelected[0] : (selectedModels.length > 0 ? selectedModels[0] : undefined));
+
+    // Enforce strict provider-model compatibility (never carry invalid models across providers)
+    if (activeModel && !validateModelProviderMatch(activeProvider, activeModel).valid) {
+      activeModel = undefined;
+    }
 
     // User-configured team roles (NO built-in or hardcoded role models)
     const resolvedRoles: RoleModelConfig = {
@@ -571,13 +1106,21 @@ export class ConfigManager {
     if (process.env.MODEL_TESTER) resolvedRoles.tester = process.env.MODEL_TESTER;
     if (process.env.MODEL_VERIFIER) resolvedRoles.verifier = process.env.MODEL_VERIFIER;
 
+    const reasoningEffort = (localFileConfig.reasoningEffort || globalFileConfig.reasoningEffort || 'medium') as ReasoningEffort;
+
     return {
       mode,
       activeModel,
       selectedModels,
+      reasoningEffort,
       activeProvider,
-      providers: { ...defaultProviders, ...fileProviders },
+      providers: mergedProviders,
       roles: resolvedRoles,
+      modelSettings: { ...(globalFileConfig.modelSettings || {}), ...(localFileConfig.modelSettings || {}) },
+      fallbackChains: { ...(globalFileConfig.fallbackChains || {}), ...(localFileConfig.fallbackChains || {}) },
+      favorites: Array.from(new Set([...(globalFileConfig.favorites || []), ...(localFileConfig.favorites || [])])),
+      recentlyUsed: Array.from(new Set([...(globalFileConfig.recentlyUsed || []), ...(localFileConfig.recentlyUsed || [])])),
+      retiredModels: { ...(globalFileConfig.retiredModels || {}), ...(localFileConfig.retiredModels || {}) },
       workdir,
       stateDir: paths.stateDir,
       worktreeDir: paths.worktreeDir,

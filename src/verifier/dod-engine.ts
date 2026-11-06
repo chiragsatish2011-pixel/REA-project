@@ -364,13 +364,24 @@ export class DoDEngine {
       let timedOut = false;
 
       const cwd = fs.existsSync(worktreePath) ? worktreePath : process.cwd();
+      const nodeBinCwd = path.join(cwd, 'node_modules', '.bin');
+      const nodeBinRoot = path.join(process.cwd(), 'node_modules', '.bin');
+      const existingPath = process.env.PATH || process.env.Path || '';
+      const augmentedPath = `${nodeBinCwd}${path.delimiter}${nodeBinRoot}${path.delimiter}${existingPath}`;
+
       const isWindows = process.platform === 'win32';
       const shell = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
       const shellArgs = isWindows ? ['/d', '/s', '/c', criterion.command] : ['-c', criterion.command];
 
       const child = spawn(shell, shellArgs, {
         cwd,
-        env: { ...process.env, CI: 'true', FORCE_COLOR: '0' },
+        env: {
+          ...process.env,
+          PATH: augmentedPath,
+          Path: augmentedPath,
+          CI: 'true',
+          FORCE_COLOR: '0',
+        },
         windowsVerbatimArguments: isWindows,
       });
 

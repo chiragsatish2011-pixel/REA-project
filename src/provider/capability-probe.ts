@@ -122,6 +122,7 @@ export class CapabilityProbe {
     try {
       const resp = await client.chat({
         model: modelId,
+        purpose: 'probe',
         messages: [
           {
             role: 'user',
@@ -151,6 +152,7 @@ export class CapabilityProbe {
     try {
       const stream = client.chatStream({
         model: modelId,
+        purpose: 'probe',
         messages: [
           {
             role: 'user',

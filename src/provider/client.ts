@@ -33,6 +33,33 @@ import {
 } from './types.js';
 import { NominRateLimitScheduler } from './rate-limiter.js';
 import { JsonRepair } from './json-repair.js';
+import { NominLogger } from './logger.js';
+import { ModelSettingsManager } from './model-settings.js';
+import { RequestLedger, requestLedger, type RequestPurpose, type LedgerEntry } from './request-ledger.js';
+import { RequestGateway, GatewayPriority } from './request-gateway.js';
+
+export { RequestLedger, requestLedger } from './request-ledger.js';
+export { RequestGateway, GatewayPriority } from './request-gateway.js';
+
+export interface SseRequestContext {
+  model?: string;
+  provider?: string;
+  purpose?: RequestPurpose;
+  onEntryCreated?: (entry: LedgerEntry) => void;
+}
+
+export function inferRequestPurpose(options: ChatCompletionOptions): RequestPurpose {
+  if (options.purpose) return options.purpose;
+  if (!options.messages || options.messages.length === 0) return 'chat';
+  const lastMsg = options.messages[options.messages.length - 1];
+  if (lastMsg && (lastMsg.role === 'tool' || lastMsg.toolCallId || lastMsg.tool_call_id)) {
+    return 'tool-continuation';
+  }
+  if (options.messages.some(m => m.role === 'tool')) {
+    return 'tool-continuation';
+  }
+  return 'chat';
+}
 
 export interface HttpClientOptions {
   config: ProviderConfig;
@@ -45,13 +72,29 @@ export class NominHttpError extends Error {
   public readonly body: string;
   public readonly code?: string;
 
-  constructor(status: number, message: string, headers: Record<string, string> = {}, body: string = '', code?: string) {
-    super(`[HTTP ${status}] ${message}`);
+  constructor(
+    statusOrOpts: number | { status?: number; statusCode?: number; message?: string; headers?: Record<string, string>; body?: string; responseBody?: string; code?: string; provider?: string; model?: string },
+    message?: string,
+    headers: Record<string, string> = {},
+    body: string = '',
+    code?: string
+  ) {
+    if (typeof statusOrOpts === 'object') {
+      const s = statusOrOpts.status ?? statusOrOpts.statusCode ?? 500;
+      const m = statusOrOpts.message || 'HTTP Error';
+      super(`[HTTP ${s}] ${m}`);
+      this.status = s;
+      this.headers = statusOrOpts.headers || {};
+      this.body = statusOrOpts.body || statusOrOpts.responseBody || '';
+      this.code = statusOrOpts.code;
+    } else {
+      super(`[HTTP ${statusOrOpts}] ${message || 'HTTP Error'}`);
+      this.status = statusOrOpts;
+      this.headers = headers;
+      this.body = body;
+      this.code = code;
+    }
     this.name = 'NominHttpError';
-    this.status = status;
-    this.headers = headers;
-    this.body = body;
-    this.code = code;
   }
 }
 
@@ -151,6 +194,14 @@ export class NominHttpClient extends EventEmitter {
     });
   }
 
+  public static getLedger(): RequestLedger {
+    return requestLedger;
+  }
+
+  public getLedger(): RequestLedger {
+    return requestLedger;
+  }
+
   public getHttpAgent(): http.Agent {
     return this.httpAgent;
   }
@@ -204,9 +255,13 @@ export class NominHttpClient extends EventEmitter {
       'User-Agent': 'NominCode-UniversalClient/1.0',
     };
     if (this.config.apiKey) {
-      headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+      const cleanKey = this.config.apiKey.trim().replace(/^Bearer\s+/i, '').replace(/^["']|["']$/g, '').replace(/[\r\n]+/g, '');
+      if (cleanKey) {
+        headers['Authorization'] = `Bearer ${cleanKey}`;
+      }
     }
 
+    const startTime = Date.now();
     return new Promise((resolve, reject) => {
       const req = clientModule.request(
         {
@@ -222,6 +277,22 @@ export class NominHttpClient extends EventEmitter {
           let data = '';
           res.on('data', (chunk) => { data += chunk; });
           res.on('end', () => {
+            const latencyMs = Date.now() - startTime;
+            const rateLimitHeaders = RequestLedger.extractRateLimitHeaders(res.headers);
+            const status = res.statusCode || 0;
+
+            requestLedger.recordCall({
+              purpose: 'probe',
+              model: 'models-catalog',
+              provider: this.config.id || this.config.type || 'nvidia-nim',
+              status,
+              latencyMs,
+              tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+              rateLimitHeaders,
+              error: status >= 400 ? data.slice(0, 200) : undefined,
+              attempt: 1,
+            });
+
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
               try {
                 const parsed = JSON.parse(data);
@@ -241,11 +312,111 @@ export class NominHttpClient extends EventEmitter {
           });
         }
       );
-      req.on('error', reject);
+      req.on('error', (err) => {
+        const latencyMs = Date.now() - startTime;
+        requestLedger.recordCall({
+          purpose: 'probe',
+          model: 'models-catalog',
+          provider: this.config.id || this.config.type || 'nvidia-nim',
+          status: 0,
+          latencyMs,
+          tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          rateLimitHeaders: {},
+          error: (err as Error).message,
+          attempt: 1,
+        });
+        reject(err);
+      });
       req.on('timeout', () => {
         req.destroy();
         reject(new Error('Timed out listing models from provider.'));
       });
+      req.end();
+    });
+  }
+
+  /**
+   * Resolves the gateway priority level (LIVE_TURN=0, TOOL_CONTINUATION=1, VERIFIER=2, BACKGROUND=3)
+   * from completion options and conversational intent.
+   */
+  public resolveGatewayPriority(options: ChatCompletionOptions): GatewayPriority {
+    if (options.priority !== undefined && options.priority !== null) {
+      const prioNum = Number(options.priority);
+      if (prioNum <= 0) return GatewayPriority.LIVE_TURN;
+      if (prioNum === 1) return GatewayPriority.TOOL_CONTINUATION;
+      if (prioNum === 2) return GatewayPriority.VERIFIER;
+      return GatewayPriority.BACKGROUND;
+    }
+    const purpose = options.purpose || inferRequestPurpose(options);
+    switch (purpose) {
+      case 'verifier':
+        return GatewayPriority.VERIFIER;
+      case 'tool-continuation':
+        return GatewayPriority.TOOL_CONTINUATION;
+      case 'chat':
+        return GatewayPriority.LIVE_TURN;
+      case 'probe':
+      case 'summary':
+      case 'router':
+      case 'planner':
+      default:
+        return GatewayPriority.BACKGROUND;
+    }
+  }
+
+  /**
+   * Low-level socket transport helper for non-chat provider validation pings.
+   * Keeps all Node.js http/https socket calls strictly inside client.ts.
+   */
+  public static async rawHttpRequest(
+    url: URL,
+    options: {
+      method?: string;
+      headers?: Record<string, string>;
+      timeoutMs?: number;
+      body?: string;
+    } = {}
+  ): Promise<{ status: number; body: string; resHeaders: Record<string, string> }> {
+    return new Promise((resolve, reject) => {
+      const isHttps = url.protocol === 'https:';
+      const requestModule = isHttps ? https : http;
+
+      const req = requestModule.request(
+        {
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: `${url.pathname}${url.search}`,
+          method: options.method || 'GET',
+          headers: options.headers || {},
+          timeout: options.timeoutMs ?? 10000,
+        },
+        res => {
+          let body = '';
+          res.setEncoding('utf8');
+          res.on('data', chunk => { body += chunk; });
+          res.on('end', () => {
+            const resHeaders: Record<string, string> = {};
+            for (const [k, v] of Object.entries(res.headers)) {
+              if (typeof v === 'string') resHeaders[k.toLowerCase()] = v;
+              else if (Array.isArray(v)) resHeaders[k.toLowerCase()] = v.join(', ');
+            }
+            resolve({
+              status: res.statusCode || 500,
+              body,
+              resHeaders,
+            });
+          });
+        }
+      );
+
+      req.on('error', err => reject(err));
+      req.on('timeout', () => {
+        req.destroy(new Error('Request timed out'));
+      });
+      if (options.body) {
+        req.write(options.body);
+      }
       req.end();
     });
   }
@@ -336,86 +507,114 @@ export class NominHttpClient extends EventEmitter {
       };
     };
 
-    if (this.scheduler) {
-      const estimatedPromptTokens = this.estimateTokens(options.messages);
-      const estimatedMaxTokens = options.maxTokens ?? 2048;
+    const runCall = async (): Promise<ChatCompletionResponse> => {
+      if (this.scheduler) {
+        const estimatedPromptTokens = this.estimateTokens(options.messages);
+        const estimatedMaxTokens = options.maxTokens ?? 2048;
 
-      return this.scheduler.schedule(execute, {
-        promptTokens: estimatedPromptTokens,
-        maxTokens: estimatedMaxTokens,
-        priority: options.priority ?? RequestPriority.BACKGROUND,
-        signal: options.signal,
-      });
-    }
+        return this.scheduler.schedule(execute, {
+          promptTokens: estimatedPromptTokens,
+          maxTokens: estimatedMaxTokens,
+          priority: options.priority ?? RequestPriority.BACKGROUND,
+          signal: options.signal,
+        });
+      }
 
-    return execute();
+      return execute();
+    };
+
+    const gatewayPriority = this.resolveGatewayPriority(options);
+
+    return RequestGateway.getInstance().schedule(runCall, {
+      provider: this.config.id || this.config.type || 'unknown',
+      model: options.model,
+      apiKey: this.config.apiKey,
+      priority: gatewayPriority,
+      signal: options.signal,
+      purpose: options.purpose || inferRequestPurpose(options),
+    });
   }
 
   /**
    * Unified streaming interface emitting normalized StreamChunk tokens.
    */
   public async *chatStream(options: ChatCompletionOptions): AsyncGenerator<StreamChunk> {
-    if (this.scheduler) {
-      // In scheduler mode, the stream generation is queued and scheduled
-      const estimatedPromptTokens = this.estimateTokens(options.messages);
-      const estimatedMaxTokens = options.maxTokens ?? 2048;
+    const gatewayPriority = this.resolveGatewayPriority(options);
 
-      // Create a shared generator queue to pull through the scheduler
-      const queue: (StreamChunk | null)[] = [];
-      let notify: (() => void) | null = null;
-      let errorOccurred: unknown = null;
-      let isDone = false;
+    const release = await RequestGateway.getInstance().acquireSlot({
+      provider: this.config.id || this.config.type || 'unknown',
+      model: options.model,
+      apiKey: this.config.apiKey,
+      priority: gatewayPriority,
+      signal: options.signal,
+      purpose: options.purpose || inferRequestPurpose(options),
+    });
 
-      const pushChunk = (chunk: StreamChunk | null) => {
-        queue.push(chunk);
-        if (notify) {
-          notify();
-          notify = null;
-        }
-      };
+    try {
+      if (this.scheduler) {
+        // In scheduler mode, the stream generation is queued and scheduled
+        const estimatedPromptTokens = this.estimateTokens(options.messages);
+        const estimatedMaxTokens = options.maxTokens ?? 2048;
 
-      const streamPromise = this.scheduler.schedule(async () => {
-        try {
-          for await (const chunk of this.chatStreamInternal(options)) {
-            pushChunk(chunk);
+        // Create a shared generator queue to pull through the scheduler
+        const queue: (StreamChunk | null)[] = [];
+        let notify: (() => void) | null = null;
+        let errorOccurred: unknown = null;
+        let isDone = false;
+
+        const pushChunk = (chunk: StreamChunk | null) => {
+          queue.push(chunk);
+          if (notify) {
+            notify();
+            notify = null;
           }
-        } catch (err) {
+        };
+
+        const streamPromise = this.scheduler.schedule(async () => {
+          try {
+            for await (const chunk of this.chatStreamInternal(options)) {
+              pushChunk(chunk);
+            }
+          } catch (err) {
+            errorOccurred = err;
+          } finally {
+            isDone = true;
+            pushChunk(null);
+          }
+        }, {
+          promptTokens: estimatedPromptTokens,
+          maxTokens: estimatedMaxTokens,
+          priority: options.priority ?? RequestPriority.BACKGROUND,
+          signal: options.signal,
+        });
+
+        // Avoid unhandled rejection on streamPromise
+        void streamPromise.catch(err => {
           errorOccurred = err;
-        } finally {
           isDone = true;
           pushChunk(null);
-        }
-      }, {
-        promptTokens: estimatedPromptTokens,
-        maxTokens: estimatedMaxTokens,
-        priority: options.priority ?? RequestPriority.BACKGROUND,
-        signal: options.signal,
-      });
+        });
 
-      // Avoid unhandled rejection on streamPromise
-      void streamPromise.catch(err => {
-        errorOccurred = err;
-        isDone = true;
-        pushChunk(null);
-      });
-
-      while (!isDone || queue.length > 0) {
-        if (queue.length === 0) {
-          await new Promise<void>(res => { notify = res; });
-        }
-        while (queue.length > 0) {
-          const item = queue.shift();
-          if (item === null) {
-            if (errorOccurred) throw errorOccurred;
-            return;
+        while (!isDone || queue.length > 0) {
+          if (queue.length === 0) {
+            await new Promise<void>(res => { notify = res; });
           }
-          if (item) yield item;
+          while (queue.length > 0) {
+            const item = queue.shift();
+            if (item === null) {
+              if (errorOccurred) throw errorOccurred;
+              return;
+            }
+            if (item) yield item;
+          }
         }
+        return;
       }
-      return;
-    }
 
-    yield* this.chatStreamInternal(options);
+      yield* this.chatStreamInternal(options);
+    } finally {
+      release();
+    }
   }
 
   /**
@@ -448,7 +647,10 @@ export class NominHttpClient extends EventEmitter {
     };
 
     if (this.config.apiKey) {
-      headers['Authorization'] = `Bearer ${this.config.apiKey}`;
+      const cleanKey = this.config.apiKey.trim().replace(/^Bearer\s+/i, '').replace(/^["']|["']$/g, '').replace(/[\r\n]+/g, '');
+      if (cleanKey) {
+        headers['Authorization'] = `Bearer ${cleanKey}`;
+      }
     }
 
     // Speculative tool accumulation buffers
@@ -461,6 +663,15 @@ export class NominHttpClient extends EventEmitter {
     let firstTokenTime: number | null = null;
     let finalUsage: TokenUsage | undefined;
 
+    const purpose = inferRequestPurpose(options);
+    let recordedEntry: any = null;
+    const reqContext: SseRequestContext = {
+      model: options.model,
+      provider: this.config.id || this.config.type || 'unknown',
+      purpose,
+      onEntryCreated: (e) => { recordedEntry = e; },
+    };
+
     const recordFirstToken = () => {
       if (firstTokenTime === null) {
         firstTokenTime = Date.now();
@@ -469,161 +680,198 @@ export class NominHttpClient extends EventEmitter {
       }
     };
 
-    const sseLines = this.requestSseStream(endpointUrl, headers, bodyStr, options.signal);
+    let currentBodyStr = bodyStr;
+    let retriedWithoutReasoning = false;
 
-    for await (const line of sseLines) {
-      if (!line.startsWith('data:')) continue;
-      const dataStr = line.slice(5).trim();
-      if (!dataStr) continue;
-      if (dataStr === '[DONE]') {
-        const totalDurationMs = Date.now() - startTime;
-        const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
-        this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
-        yield { type: 'finish', reason: 'stop' };
-        break;
-      }
-
-      let parsed: any;
+    while (true) {
       try {
-        parsed = JSON.parse(dataStr);
-      } catch {
-        continue;
-      }
+        const sseLines = this.requestSseStream(endpointUrl, headers, currentBodyStr, options.signal, reqContext);
 
-      // Check usage chunk (often present in OpenAI or DeepSeek stream options)
-      if (parsed.usage) {
-        finalUsage = {
-          promptTokens: parsed.usage.prompt_tokens ?? 0,
-          completionTokens: parsed.usage.completion_tokens ?? 0,
-          totalTokens: parsed.usage.total_tokens ?? 0,
-          cacheReadTokens: parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
-          reasoningTokens: parsed.usage.completion_tokens_details?.reasoning_tokens,
-        };
-        yield {
-          type: 'usage',
-          usage: finalUsage,
-        };
-      }
-
-      const choice = parsed.choices?.[0];
-      if (!choice) continue;
-
-      const delta = choice.delta;
-      if (!delta) {
-        if (choice.finish_reason) {
-          const finishReason = this.normalizeFinishReason(choice.finish_reason);
-          const totalDurationMs = Date.now() - startTime;
-          const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
-          this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
-          yield { type: 'finish', reason: finishReason, raw: choice.finish_reason };
-        }
-        continue;
-      }
-
-      // 1. Check reasoning_content field (DeepSeek-R1 / NIM / vLLM native thinking)
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
-        recordFirstToken();
-        yield {
-          type: 'reasoning-delta',
-          text: delta.reasoning_content,
-        };
-      }
-
-      // 2. Check standard content chunk
-      if (typeof delta.content === 'string' && delta.content.length > 0) {
-        recordFirstToken();
-        const text = delta.content;
-
-        // Check for <think> and </think> delimiters
-        if (text.includes('<think>')) {
-          insideThinkTag = true;
-          const parts = text.split('<think>');
-          if (parts[0]) yield { type: 'text-delta', text: parts[0] };
-          if (parts[1]) yield { type: 'reasoning-delta', text: parts[1] };
-          continue;
-        }
-
-        if (text.includes('</think>')) {
-          insideThinkTag = false;
-          const parts = text.split('</think>');
-          if (parts[0]) yield { type: 'reasoning-delta', text: parts[0] };
-          if (parts[1]) yield { type: 'text-delta', text: parts[1] };
-          continue;
-        }
-
-        if (insideThinkTag) {
-          yield { type: 'reasoning-delta', text };
-        } else {
-          yield { type: 'text-delta', text };
-        }
-      }
-
-      // 3. Check tool_calls chunk
-      if (Array.isArray(delta.tool_calls)) {
-        recordFirstToken();
-        for (const tc of delta.tool_calls) {
-          const index = tc.index ?? 0;
-          const deltaArgs = tc.function?.arguments ?? '';
-          const name = tc.function?.name;
-          const id = tc.id;
-
-          let buf = toolCallBuffers.get(index);
-          if (!buf) {
-            buf = { id: id ?? `call_${index}`, name: name ?? '', args: '' };
-            toolCallBuffers.set(index, buf);
-            yield { type: 'block-start', blockType: 'tool-call', index };
+        for await (const line of sseLines) {
+          if (!line.startsWith('data:')) continue;
+          const dataStr = line.slice(5).trim();
+          if (!dataStr) continue;
+          if (dataStr === '[DONE]') {
+            const totalDurationMs = Date.now() - startTime;
+            const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+            if (recordedEntry) {
+              if (finalUsage) {
+                recordedEntry.tokens = {
+                  promptTokens: finalUsage.promptTokens,
+                  completionTokens: finalUsage.completionTokens,
+                  totalTokens: finalUsage.totalTokens,
+                };
+              }
+              recordedEntry.latencyMs = totalDurationMs;
+            }
+            this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
+            yield { type: 'finish', reason: 'stop' };
+            break;
           }
 
-          if (name) buf.name = name;
-          if (id) buf.id = id;
-          buf.args += deltaArgs;
+          let parsed: any;
+          try {
+            parsed = JSON.parse(dataStr);
+          } catch {
+            continue;
+          }
 
-          yield {
-            type: 'tool-call-delta',
-            index,
-            id: buf.id,
-            name: buf.name,
-            argumentsDelta: deltaArgs,
-          };
+          // Check usage chunk (often present in OpenAI or DeepSeek stream options)
+          if (parsed.usage) {
+            finalUsage = {
+              promptTokens: parsed.usage.prompt_tokens ?? 0,
+              completionTokens: parsed.usage.completion_tokens ?? 0,
+              totalTokens: parsed.usage.total_tokens ?? 0,
+              cacheReadTokens: parsed.usage.prompt_tokens_details?.cached_tokens ?? parsed.usage.cache_read_input_tokens,
+              reasoningTokens: parsed.usage.completion_tokens_details?.reasoning_tokens,
+            };
+            yield {
+              type: 'usage',
+              usage: finalUsage,
+            };
+          }
 
-          // Speculative tool execution hook
-          if (options.speculativeToolExecution && options.onSpeculativeToolCall && buf.args.length > 2) {
-            try {
-              const specParsed = JsonRepair.parse(buf.args);
-              options.onSpeculativeToolCall({
-                id: buf.id,
-                type: 'function',
-                function: { name: buf.name, arguments: JSON.stringify(specParsed) },
-              }, true);
-            } catch {
-              // Incomplete JSON is expected during streaming
+          const choice = parsed.choices?.[0];
+          if (!choice) continue;
+
+          const delta = choice.delta;
+          if (!delta) {
+            if (choice.finish_reason) {
+              const finishReason = this.normalizeFinishReason(choice.finish_reason);
+              const totalDurationMs = Date.now() - startTime;
+              const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+              this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
+              yield { type: 'finish', reason: finishReason, raw: choice.finish_reason };
+            }
+            continue;
+          }
+
+          // 1. Check reasoning_content field (DeepSeek-R1 / NIM / vLLM native thinking)
+          if (typeof delta.reasoning_content === 'string' && delta.reasoning_content.length > 0) {
+            recordFirstToken();
+            yield {
+              type: 'reasoning-delta',
+              text: delta.reasoning_content,
+            };
+          }
+
+          // 2. Check standard content chunk
+          if (typeof delta.content === 'string' && delta.content.length > 0) {
+            recordFirstToken();
+            const text = delta.content;
+
+            // Check for <think> and </think> delimiters
+            if (text.includes('<think>')) {
+              insideThinkTag = true;
+              const parts = text.split('<think>');
+              if (parts[0]) yield { type: 'text-delta', text: parts[0] };
+              if (parts[1]) yield { type: 'reasoning-delta', text: parts[1] };
+              continue;
+            }
+
+            if (text.includes('</think>')) {
+              insideThinkTag = false;
+              const parts = text.split('</think>');
+              if (parts[0]) yield { type: 'reasoning-delta', text: parts[0] };
+              if (parts[1]) yield { type: 'text-delta', text: parts[1] };
+              continue;
+            }
+
+            if (insideThinkTag) {
+              yield { type: 'reasoning-delta', text };
+            } else {
+              yield { type: 'text-delta', text };
             }
           }
-        }
-      }
 
-      // 4. Finish reason
-      if (choice.finish_reason) {
-        // Emit block-end for tool calls
-        for (const [index, buf] of toolCallBuffers.entries()) {
-          const repaired = JsonRepair.repair(buf.args);
-          yield {
-            type: 'block-end',
-            blockType: 'tool-call',
-            index,
-            toolCall: {
-              id: buf.id,
-              type: 'function',
-              function: { name: buf.name, arguments: repaired },
-            },
-          };
-        }
+          // 3. Check tool_calls chunk
+          if (Array.isArray(delta.tool_calls)) {
+            recordFirstToken();
+            for (const tc of delta.tool_calls) {
+              const index = tc.index ?? 0;
+              const deltaArgs = tc.function?.arguments ?? '';
+              const name = tc.function?.name;
+              const id = tc.id;
 
-        const finishReason = this.normalizeFinishReason(choice.finish_reason);
-        const totalDurationMs = Date.now() - startTime;
-        const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
-        this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
-        yield { type: 'finish', reason: finishReason, raw: choice.finish_reason };
+              let buf = toolCallBuffers.get(index);
+              if (!buf) {
+                buf = { id: id ?? `call_${index}`, name: name ?? '', args: '' };
+                toolCallBuffers.set(index, buf);
+                yield { type: 'block-start', blockType: 'tool-call', index };
+              }
+
+              if (name) buf.name = name;
+              if (id) buf.id = id;
+              buf.args += deltaArgs;
+
+              yield {
+                type: 'tool-call-delta',
+                index,
+                id: buf.id,
+                name: buf.name,
+                argumentsDelta: deltaArgs,
+              };
+
+              // Speculative tool execution hook
+              if (options.speculativeToolExecution && options.onSpeculativeToolCall && buf.args.length > 2) {
+                try {
+                  const specParsed = JsonRepair.parse(buf.args);
+                  options.onSpeculativeToolCall({
+                    id: buf.id,
+                    type: 'function',
+                    function: { name: buf.name, arguments: JSON.stringify(specParsed) },
+                  }, true);
+                } catch {
+                  // Incomplete JSON is expected during streaming
+                }
+              }
+            }
+          }
+
+          // 4. Finish reason
+          if (choice.finish_reason) {
+            // Emit block-end for tool calls
+            for (const [index, buf] of toolCallBuffers.entries()) {
+              const repaired = JsonRepair.repair(buf.args);
+              yield {
+                type: 'block-end',
+                blockType: 'tool-call',
+                index,
+                toolCall: {
+                  id: buf.id,
+                  type: 'function',
+                  function: { name: buf.name, arguments: repaired },
+                },
+              };
+            }
+
+            const finishReason = this.normalizeFinishReason(choice.finish_reason);
+            const totalDurationMs = Date.now() - startTime;
+            const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+            if (recordedEntry) {
+              if (finalUsage) {
+                recordedEntry.tokens = {
+                  promptTokens: finalUsage.promptTokens,
+                  completionTokens: finalUsage.completionTokens,
+                  totalTokens: finalUsage.totalTokens,
+                };
+              }
+              recordedEntry.latencyMs = totalDurationMs;
+            }
+            this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
+            yield { type: 'finish', reason: finishReason, raw: choice.finish_reason };
+          }
+        }
+        break; // Successfully finished stream
+      } catch (err: any) {
+        if (!retriedWithoutReasoning && err instanceof NominHttpError && (err.status === 400 || err.status === 422) && payload.reasoning_effort) {
+          retriedWithoutReasoning = true;
+          delete payload.reasoning_effort;
+          currentBodyStr = JSON.stringify(payload);
+          NominLogger.warn(`Model rejected reasoning_effort (${err.message}). Retrying standard inference payload...`);
+          continue;
+        }
+        throw err;
       }
     }
   }
@@ -676,9 +924,14 @@ export class NominHttpClient extends EventEmitter {
     }
 
     if (options.reasoningEffort && options.reasoningEffort !== 'off') {
+      let budget = 2048;
+      if (options.reasoningEffort === 'low') budget = 1024;
+      else if (options.reasoningEffort === 'medium') budget = 2048;
+      else if (options.reasoningEffort === 'high') budget = 4096;
+      else if (options.reasoningEffort === 'max') budget = 8192;
       payload.thinking = {
         type: 'enabled',
-        budget_tokens: 2048,
+        budget_tokens: budget,
       };
     }
 
@@ -691,7 +944,10 @@ export class NominHttpClient extends EventEmitter {
     };
 
     if (this.config.apiKey) {
-      headers['x-api-key'] = this.config.apiKey;
+      const cleanKey = this.config.apiKey.trim().replace(/^Bearer\s+/i, '').replace(/^["']|["']$/g, '').replace(/[\r\n]+/g, '');
+      if (cleanKey) {
+        headers['x-api-key'] = cleanKey;
+      }
     }
 
     const toolCallBuffers = new Map<number, { id: string; name: string; args: string }>();
@@ -701,6 +957,15 @@ export class NominHttpClient extends EventEmitter {
     let firstTokenTime: number | null = null;
     let finalUsage: TokenUsage | undefined;
 
+    const purpose = inferRequestPurpose(options);
+    let recordedEntry: any = null;
+    const reqContext: SseRequestContext = {
+      model: options.model,
+      provider: this.config.id || this.config.type || 'unknown',
+      purpose,
+      onEntryCreated: (e) => { recordedEntry = e; },
+    };
+
     const recordFirstToken = () => {
       if (firstTokenTime === null) {
         firstTokenTime = Date.now();
@@ -709,7 +974,7 @@ export class NominHttpClient extends EventEmitter {
       }
     };
 
-    const sseLines = this.requestSseStream(endpointUrl, headers, bodyStr, options.signal);
+    const sseLines = this.requestSseStream(endpointUrl, headers, bodyStr, options.signal, reqContext);
 
     for await (const line of sseLines) {
       if (!line.startsWith('data:')) continue;
@@ -836,6 +1101,16 @@ export class NominHttpClient extends EventEmitter {
             const reason = this.normalizeFinishReason(event.delta.stop_reason);
             const totalDurationMs = Date.now() - startTime;
             const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+            if (recordedEntry) {
+              if (finalUsage) {
+                recordedEntry.tokens = {
+                  promptTokens: finalUsage.promptTokens,
+                  completionTokens: finalUsage.completionTokens,
+                  totalTokens: finalUsage.totalTokens,
+                };
+              }
+              recordedEntry.latencyMs = totalDurationMs;
+            }
             this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
             yield { type: 'finish', reason, raw: event.delta.stop_reason };
           }
@@ -845,6 +1120,16 @@ export class NominHttpClient extends EventEmitter {
         case 'message_stop': {
           const totalDurationMs = Date.now() - startTime;
           const ttftMs = firstTokenTime !== null ? firstTokenTime - startTime : totalDurationMs;
+          if (recordedEntry) {
+            if (finalUsage) {
+              recordedEntry.tokens = {
+                promptTokens: finalUsage.promptTokens,
+                completionTokens: finalUsage.completionTokens,
+                totalTokens: finalUsage.totalTokens,
+              };
+            }
+            recordedEntry.latencyMs = totalDurationMs;
+          }
           this.emit('metrics', { model: options.model, ttftMs, totalDurationMs, usage: finalUsage });
           yield { type: 'finish', reason: 'stop' };
           break;
@@ -854,13 +1139,44 @@ export class NominHttpClient extends EventEmitter {
   }
 
   /**
+   * Computes safe backoff delay for retries.
+   * Delay = max(Retry-After if valid, minimum floor of 1s) with full jitter, capped at 60s.
+   * Total attempts capped at 6.
+   * A Retry-After of 0 or a missing header must never cause an immediate retry loop or sub-second loop.
+   */
+  public static computeRetryDelay(attempt: number, retryAfterHeader?: number | string): number {
+    const floorMs = 1000;
+    const capMs = 60000;
+    let baseMs = 1000 * Math.pow(2, Math.max(0, attempt - 1)); // 1s, 2s, 4s, 8s, 16s, 32s
+
+    if (retryAfterHeader !== undefined && retryAfterHeader !== null && retryAfterHeader !== '') {
+      const parsed = Number(retryAfterHeader);
+      if (Number.isFinite(parsed)) {
+        const ms = parsed > 1000 ? parsed : parsed * 1000;
+        if (ms > 0) {
+          baseMs = Math.max(floorMs, ms);
+        } else {
+          // Retry-After: 0 must NEVER cause an immediate or sub-second retry loop
+          baseMs = floorMs;
+        }
+      }
+    }
+
+    baseMs = Math.min(capMs, Math.max(floorMs, baseMs));
+    const jitterRange = Math.max(0, baseMs - floorMs);
+    const delayMs = floorMs + Math.floor(Math.random() * (jitterRange + 1));
+    return Math.min(capMs, Math.max(floorMs, delayMs));
+  }
+
+  /**
    * Pure Node.js HTTP/HTTPS SSE client with persistent connection pooling.
    */
   private async *requestSseStream(
     url: URL,
     headers: Record<string, string>,
     body: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    reqContext?: SseRequestContext
   ): AsyncGenerator<string> {
     const isHttps = url.protocol === 'https:';
     const agent = isHttps ? this.httpsAgent : this.httpAgent;
@@ -874,49 +1190,210 @@ export class NominHttpClient extends EventEmitter {
       method: 'POST',
       headers,
       agent,
+      timeout: this.config.timeoutMs ?? 60000,
     };
 
-    let responseStream: http.IncomingMessage;
+    let responseStream!: http.IncomingMessage;
+    // Cap total attempts at 6 per call, or respect explicit maxRetries configuration + 1
+    const maxAttempts = this.config.rateLimit?.maxRetries !== undefined
+      ? this.config.rateLimit.maxRetries + 1
+      : 6;
 
-    try {
-      responseStream = await new Promise<http.IncomingMessage>((resolve, reject) => {
-        const req = requestModule.request(requestOptions, res => {
-          const status = res.statusCode ?? 500;
-          if (status >= 400) {
-            let errorBody = '';
-            res.setEncoding('utf8');
-            res.on('data', chunk => { errorBody += chunk; });
-            res.on('end', () => {
-              const resHeaders: Record<string, string> = {};
-              for (const [k, v] of Object.entries(res.headers)) {
-                if (typeof v === 'string') resHeaders[k] = v;
-                else if (Array.isArray(v)) resHeaders[k] = v.join(', ');
-              }
-              reject(new NominHttpError(status, res.statusMessage || `HTTP ${status}`, resHeaders, errorBody));
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const attemptStartTime = Date.now();
+      try {
+        responseStream = await new Promise<http.IncomingMessage>((resolve, reject) => {
+          const req = requestModule.request(requestOptions, res => {
+            const status = res.statusCode ?? 500;
+            if (status >= 400) {
+              let errorBody = '';
+              res.setEncoding('utf8');
+              res.on('data', chunk => { errorBody += chunk; });
+              res.on('end', () => {
+                const resHeaders: Record<string, string> = {};
+                for (const [k, v] of Object.entries(res.headers)) {
+                  if (typeof v === 'string') resHeaders[k.toLowerCase()] = v;
+                  else if (Array.isArray(v)) resHeaders[k.toLowerCase()] = v.join(', ');
+                }
+
+                let detailMsg = '';
+                try {
+                  const parsed = JSON.parse(errorBody);
+                  detailMsg = parsed.detail || parsed.message || parsed.error?.message || parsed.title || '';
+                } catch (_) {}
+
+                const statusText = res.statusMessage || `HTTP ${status}`;
+                const fullMsg = detailMsg ? `${statusText}: ${detailMsg}` : statusText;
+
+                // Record HTTP failure / 429 into RequestLedger
+                const rateLimitHeaders = RequestLedger.extractRateLimitHeaders(res.headers);
+                requestLedger.recordCall({
+                  purpose: reqContext?.purpose || 'chat',
+                  model: reqContext?.model || 'unknown',
+                  provider: reqContext?.provider || this.config.id || this.config.type || 'unknown',
+                  status,
+                  latencyMs: Date.now() - attemptStartTime,
+                  tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+                  rateLimitHeaders,
+                  error: fullMsg,
+                  attempt,
+                });
+
+                // Inform RequestGateway of rate limits & errors
+                const providerKey = this.config.id || this.config.type || 'unknown';
+                const modelKey = reqContext?.model || 'unknown';
+                if (status === 429) {
+                  RequestGateway.getInstance().learnFromHeaders(providerKey, modelKey, res.headers, this.config.apiKey);
+                  RequestGateway.getInstance().recordFailure(providerKey, modelKey, 429, this.config.apiKey);
+                } else if (status >= 500 && status < 600) {
+                  RequestGateway.getInstance().recordFailure(providerKey, modelKey, status, this.config.apiKey);
+                }
+
+                reject(new NominHttpError(status, fullMsg, resHeaders, errorBody));
+              });
+              return;
+            }
+
+            // HTTP 200 OK - Record initial successful connection
+            const rateLimitHeaders = RequestLedger.extractRateLimitHeaders(res.headers);
+            const entry = requestLedger.recordCall({
+              purpose: reqContext?.purpose || 'chat',
+              model: reqContext?.model || 'unknown',
+              provider: reqContext?.provider || this.config.id || this.config.type || 'unknown',
+              status,
+              latencyMs: Date.now() - attemptStartTime,
+              tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+              rateLimitHeaders,
+              attempt,
             });
-            return;
+
+            // Inform RequestGateway of success to close circuit breaker and learn limit headers
+            const providerKey = this.config.id || this.config.type || 'unknown';
+            const modelKey = reqContext?.model || 'unknown';
+            RequestGateway.getInstance().recordSuccess(providerKey, modelKey, this.config.apiKey);
+            RequestGateway.getInstance().learnFromHeaders(providerKey, modelKey, res.headers, this.config.apiKey);
+
+            if (reqContext?.onEntryCreated) {
+              reqContext.onEntryCreated(entry);
+            }
+
+            resolve(res);
+          });
+
+          req.on('error', err => reject(err));
+          req.on('timeout', () => {
+            req.destroy(new Error('Request timed out'));
+          });
+
+          if (signal) {
+            const onAbort = () => {
+              req.destroy(new Error('Request aborted by caller'));
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+            req.on('close', () => signal.removeEventListener('abort', onAbort));
           }
-          resolve(res);
+
+          req.write(body);
+          req.end();
         });
 
-        req.on('error', err => reject(err));
-
-        if (signal) {
-          const onAbort = () => {
-            req.destroy(new Error('Request aborted by caller'));
-          };
-          signal.addEventListener('abort', onAbort, { once: true });
-          req.on('close', () => signal.removeEventListener('abort', onAbort));
+        // Connection successfully established
+        break;
+      } catch (err: any) {
+        if (signal?.aborted) {
+          throw new Error('Request aborted by signal');
         }
 
-        req.write(body);
-        req.end();
-      });
-    } catch (err: any) {
-      if (signal?.aborted) {
-        throw new Error('Request aborted by signal');
+        if (!(err instanceof NominHttpError)) {
+          requestLedger.recordCall({
+            purpose: reqContext?.purpose || 'chat',
+            model: reqContext?.model || 'unknown',
+            provider: reqContext?.provider || this.config.id || this.config.type || 'unknown',
+            status: 0,
+            latencyMs: Date.now() - attemptStartTime,
+            tokens: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            rateLimitHeaders: {},
+            error: err?.message || 'Network error',
+            attempt,
+          });
+        }
+
+        // 1. Never retry 401/403/400/404/422 - show the diagnosis immediately
+        const isAuthError = err instanceof NominHttpError && (err.status === 401 || err.status === 403);
+        const isClientError = err instanceof NominHttpError && (err.status === 400 || err.status === 404 || err.status === 422);
+        if (isAuthError || isClientError) {
+          NominLogger.error(`Non-retryable client/auth error ${err.status}: ${err.message}`);
+          throw err;
+        }
+
+        // 2. Classify retryable errors: 429, 5xx, timeouts, and network errors
+        const is429 = err instanceof NominHttpError && err.status === 429;
+        const is5xx = err instanceof NominHttpError && err.status >= 500 && err.status < 600;
+        const isTimeout =
+          (err instanceof NominHttpError && err.status === 408) ||
+          err?.code === 'ETIMEDOUT' ||
+          err?.message?.toLowerCase().includes('timed out');
+        const isNetworkErr =
+          err?.code === 'ECONNRESET' ||
+          err?.code === 'ECONNREFUSED' ||
+          err?.code === 'EPIPE' ||
+          err?.code === 'ENOTFOUND';
+
+        const isRetryable = is429 || is5xx || isTimeout || isNetworkErr;
+        const provDisplayName =
+          this.config.id === 'nim' || this.config.type === 'nvidia-nim' || this.getBaseURL().includes('nvidia.com')
+            ? 'NVIDIA NIM'
+            : (this.config.name || 'API Provider');
+
+        if (isRetryable && attempt < maxAttempts) {
+          const retryHeader = err instanceof NominHttpError
+            ? (err.headers?.['retry-after-ms'] ?? err.headers?.['retry-after'])
+            : undefined;
+          const delayMs = NominHttpClient.computeRetryDelay(attempt, retryHeader);
+          const delaySec = Math.max(1, Math.round(delayMs / 1000));
+
+          NominLogger.warn(
+            `Safe Retry [Attempt ${attempt}/${maxAttempts}]: ${provDisplayName} returned ${err?.status || err?.code || 'error'}. Retrying in ${delaySec}s...`
+          );
+
+          this.emit('retryCountdown', {
+            provider: provDisplayName,
+            delayMs,
+            delaySec,
+            attempt: attempt + 1,
+            maxAttempts,
+            status: err?.status,
+          });
+
+          // Live countdown during backoff
+          for (let s = delaySec; s > 0; s--) {
+            if (signal?.aborted) throw new Error('Request cancelled by user');
+            const countdownMsg = `Rate limited by ${provDisplayName}, retrying in ${s}s (attempt ${attempt + 1}/${maxAttempts})`;
+            if (process.stderr && process.stderr.isTTY) {
+              process.stderr.write(`\r\x1b[33m⏳ ${countdownMsg}\x1b[0m`);
+            }
+            this.emit('countdownTick', { message: countdownMsg, remainingSec: s, attempt: attempt + 1, maxAttempts });
+            await new Promise(r => setTimeout(r, 1000));
+          }
+          if (process.stderr && process.stderr.isTTY) {
+            process.stderr.write('\r\x1b[K');
+          }
+
+          continue; // Auto-resume: continue loop from exact point
+        }
+
+        if (is429) {
+          throw new NominHttpError(
+            429,
+            `Rate limit exhausted after ${maxAttempts} attempt(s) on ${provDisplayName}. Current RPM limit reached. Use /retry to resume when ready, or check /stats.`,
+            err.headers,
+            err.body
+          );
+        }
+
+        NominLogger.error(`Request failed without further retries: ${err?.message}`);
+        throw err;
       }
-      throw err;
     }
 
     // Line buffering for SSE frames
@@ -983,6 +1460,14 @@ export class NominHttpClient extends EventEmitter {
     if (options.topP !== undefined) payload.top_p = options.topP;
     if (options.maxTokens !== undefined) payload.max_tokens = options.maxTokens;
     if (options.stop !== undefined) payload.stop = options.stop;
+
+    if (options.reasoningEffort && options.reasoningEffort !== 'off') {
+      ModelSettingsManager.adaptPayload(payload, {
+        modelId: options.model,
+        providerId: this.config.id || this.config.type,
+        reasoningEffort: options.reasoningEffort,
+      });
+    }
 
     if (options.tools && options.tools.length > 0) {
       payload.tools = canonicalizeTools(options.tools);

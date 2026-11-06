@@ -10,3 +10,5 @@ export * from './mailbox.js';
 export * from './reminder-policy.js';
 export * from './compaction.js';
 export * from './coordinator.js';
+export * from './plan-validator.js';
+export * from './intent-router.js';

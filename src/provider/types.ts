@@ -4,6 +4,8 @@
  * Zero external dependencies.
  */
 
+import type { RequestPurpose } from './request-ledger.js';
+
 export type ProviderType = 
   | 'nvidia-nim' 
   | 'openai' 
@@ -26,9 +28,12 @@ export const DEFAULT_BASE_URLS: Readonly<Record<ProviderType, string>> = {
 };
 
 export enum RequestPriority {
+  LIVE_TURN = 0,
   CRITICAL = 0,    // Architect task dispatch, Verifier completion gate
+  TOOL_CONTINUATION = 1,
   INTERACTIVE = 1, // User direct intervention, CLI prompt
-  BACKGROUND = 2,  // Coder / Tester iterative execution, linter runs
+  VERIFIER = 2,
+  BACKGROUND = 3,  // Coder / Tester iterative execution, linter runs, probes
 }
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool' | 'developer';
@@ -87,6 +92,14 @@ export type ToolChoice =
 
 export type ReasoningEffort = 'off' | 'low' | 'medium' | 'high' | 'max';
 
+export interface RetryCountdownInfo {
+  provider: string;
+  model: string;
+  delaySec: number;
+  attempt: number;
+  maxAttempts: number;
+}
+
 export interface ChatCompletionOptions {
   model: string;
   messages: ChatMessage[];
@@ -99,11 +112,13 @@ export interface ChatCompletionOptions {
   reasoningEffort?: ReasoningEffort;
   stop?: string | string[];
   priority?: RequestPriority;
+  purpose?: RequestPurpose;
   signal?: AbortSignal;
   speculativeToolExecution?: boolean;
   onSpeculativeToolCall?: (toolCall: ToolCall, isPartial: boolean) => void;
   headers?: Record<string, string>;
   enablePromptCaching?: boolean;
+  onRetryCountdown?: (info: RetryCountdownInfo) => void;
 }
 
 export interface TokenUsage {
@@ -205,6 +220,7 @@ export interface RateLimiterConfig {
   maxTimeoutRetries?: number;
   leakyBucketIntervalMs?: number;
   aimdSuccessWindow?: number;
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 export type ToolCallMode = 
@@ -261,9 +277,76 @@ export interface ProviderConfig {
   defaultModel?: string;
   models?: string[];
   headers?: Record<string, string>;
-  rateLimit?: RateLimiterConfig;
+  rateLimit?: Partial<RateLimiterConfig>;
   timeoutMs?: number;
   streamIdleTimeoutMs?: number;
   maxSockets?: number;
   keepAliveMsecs?: number;
+}
+
+export type ModelType =
+  | 'chat'
+  | 'completion'
+  | 'embedding'
+  | 'rerank'
+  | 'image'
+  | 'audio'
+  | 'guard'
+  | 'other';
+
+export interface DiscoveredModel {
+  id: string;
+  providerId: string;
+  publisher: string;
+  modelType: ModelType;
+  object?: string;
+  created?: number;
+  owned_by?: string;
+  contextWindow?: number;
+  supportsTools?: boolean;
+  supportsReasoning?: boolean;
+  supportsVision?: boolean;
+  lastProbedAt?: number;
+  isAlive?: boolean;
+  retiredReason?: string;
+  rateLimits?: {
+    rpm?: number;
+    tpm?: number;
+  };
+}
+
+export interface ModelSettings {
+  modelId: string;
+  providerId?: string;
+  reasoningEffort?: ReasoningEffort;
+  reasoningBudgetTokens?: number;
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
+  maxOutputTokens?: number;
+  stop?: string | string[];
+  seed?: number;
+  contextBudget?: number;
+  stream?: boolean;
+  toolCallMode?: ToolCallMode;
+  timeoutMs?: number;
+  rpmLimit?: number;
+}
+
+export interface CatalogCache {
+  providerId: string;
+  baseUrl: string;
+  fetchedAt: number;
+  models: DiscoveredModel[];
+}
+
+export interface PoolModelItem {
+  providerId: string;
+  modelId: string;
+  addedAt: number;
+  isRetired?: boolean;
+  retiredReason?: string;
+  isFavorite?: boolean;
+  lastUsedAt?: number;
+  lastVerifiedAt?: number;
 }

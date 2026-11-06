@@ -265,19 +265,7 @@ export class Blackboard extends EventEmitter {
 
     this.state.taskDAG.tasks[task.id] = task;
 
-    // Update parent dependencies to record this task as a dependent
-    for (const parentId of task.dependencies) {
-      const parent = this.state.taskDAG.tasks[parentId];
-      if (parent) {
-        if (!parent.dependents) {
-          parent.dependents = [];
-        }
-        if (!parent.dependents.includes(task.id)) {
-          parent.dependents.push(task.id);
-        }
-      }
-    }
-
+    this.recomputeDependentsGraph();
     this.state.metadata.totalTasks = Object.keys(this.state.taskDAG.tasks).length;
     this.recomputeTopologicalSort();
 
@@ -431,20 +419,41 @@ export class Blackboard extends EventEmitter {
   }
 
   /**
-   * Performs topological sort using Kahn's algorithm with cycle detection.
+   * Resets all tasks and DAG state for a new swarm execution turn.
+   */
+  public resetTasks(): void {
+    const now = Date.now();
+    this.state.taskDAG = {
+      sessionId: this.getSessionId(),
+      tasks: {},
+      topologicalOrder: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.state.metadata.totalTasks = 0;
+    this.state.metadata.completedTasks = 0;
+    this.state.metadata.failedTasks = 0;
+  }
+
+  /**
+   * Performs topological sort using Kahn's algorithm with direct adjacency building
+   * to guarantee consistency regardless of task insertion order.
    */
   public recomputeTopologicalSort(): string[] {
     const tasks = this.state.taskDAG.tasks;
     const inDegree: Record<string, number> = {};
     const taskIds = Object.keys(tasks);
+    const adj: Record<string, string[]> = {};
 
     for (const id of taskIds) {
       inDegree[id] = 0;
+      adj[id] = [];
     }
 
     for (const task of Object.values(tasks)) {
       for (const depId of task.dependencies) {
         if (tasks[depId]) {
+          adj[depId].push(task.id);
           inDegree[task.id] = (inDegree[task.id] || 0) + 1;
         }
       }
@@ -462,8 +471,8 @@ export class Blackboard extends EventEmitter {
       const current = queue.shift()!;
       sorted.push(current);
 
-      const dependents = tasks[current]?.dependents || [];
-      for (const childId of dependents) {
+      const children = adj[current] || [];
+      for (const childId of children) {
         if (inDegree[childId] !== undefined) {
           inDegree[childId]--;
           if (inDegree[childId] === 0) {

@@ -224,10 +224,11 @@ export class NominRateLimitScheduler {
   private readonly leakyShaper: LeakyBucketShaper;
   private readonly aimdGate: AimdConcurrencyGate;
 
-  // 3-tier Priority Queue: CRITICAL (0), INTERACTIVE (1), BACKGROUND (2)
+  // 4-tier Priority Queue: LIVE_TURN (0), TOOL_CONTINUATION (1), VERIFIER (2), BACKGROUND (3)
   private readonly queues: Map<RequestPriority, ScheduledTask<any>[]> = new Map([
-    [RequestPriority.CRITICAL, []],
-    [RequestPriority.INTERACTIVE, []],
+    [RequestPriority.LIVE_TURN, []],
+    [RequestPriority.TOOL_CONTINUATION, []],
+    [RequestPriority.VERIFIER, []],
     [RequestPriority.BACKGROUND, []],
   ]);
 
@@ -337,8 +338,8 @@ export class NominRateLimitScheduler {
   }
 
   private getNextCandidate(): ScheduledTask<any> | null {
-    // Check queues strictly by priority: CRITICAL > INTERACTIVE > BACKGROUND
-    for (const priority of [RequestPriority.CRITICAL, RequestPriority.INTERACTIVE, RequestPriority.BACKGROUND]) {
+    // Check queues strictly by priority: LIVE_TURN > TOOL_CONTINUATION > VERIFIER > BACKGROUND
+    for (const priority of [RequestPriority.LIVE_TURN, RequestPriority.TOOL_CONTINUATION, RequestPriority.VERIFIER, RequestPriority.BACKGROUND]) {
       const queue = this.queues.get(priority);
       if (queue && queue.length > 0) {
         return queue[0];
@@ -348,7 +349,7 @@ export class NominRateLimitScheduler {
   }
 
   private popNextCandidate(): ScheduledTask<any> | null {
-    for (const priority of [RequestPriority.CRITICAL, RequestPriority.INTERACTIVE, RequestPriority.BACKGROUND]) {
+    for (const priority of [RequestPriority.LIVE_TURN, RequestPriority.TOOL_CONTINUATION, RequestPriority.VERIFIER, RequestPriority.BACKGROUND]) {
       const queue = this.queues.get(priority);
       if (queue && queue.length > 0) {
         return queue.shift()!;
@@ -532,17 +533,21 @@ export class NominRateLimitScheduler {
    * sleep = min(T_ceiling, max(random(0, min(T_ceiling, base * 2^attempt)), T_header))
    * Bounded at RETRY_AFTER_MAX_MS (15 minutes).
    */
-  public computeFullJitterBackoff(attempt: number, headerDelayMs?: number): number {
+  public computeFullJitterBackoff(attempt: number, headerDelayMs?: number, floorMs?: number): number {
     const exponential = this.baseBackoffMs * Math.pow(2, attempt);
     const capped = Math.min(this.maxBackoffMs, exponential);
     const jittered = Math.floor(Math.random() * capped);
 
-    if (headerDelayMs !== undefined && headerDelayMs > 0) {
-      const boundedHeader = Math.min(this.maxBackoffMs, headerDelayMs);
+    if (headerDelayMs !== undefined && headerDelayMs >= 0) {
+      // Strict 1s floor enforcement (NO sub-second spinloops or 700 calls in 5s like OpenCode #37076)
+      const minFloor = floorMs ?? 1000;
+      const flooredHeader = Math.max(minFloor, headerDelayMs);
+      const boundedHeader = Math.min(this.maxBackoffMs, flooredHeader);
       return Math.min(this.maxBackoffMs, Math.max(jittered, boundedHeader));
     }
 
-    return Math.max(250, jittered);
+    const minFloor = floorMs ?? 250;
+    return Math.min(60000, Math.max(minFloor, jittered));
   }
 
   /**
@@ -632,8 +637,8 @@ export class NominRateLimitScheduler {
   }
 
   public getStatus(): SchedulerMetrics {
-    const qCrit = this.queues.get(RequestPriority.CRITICAL)?.length ?? 0;
-    const qInter = this.queues.get(RequestPriority.INTERACTIVE)?.length ?? 0;
+    const qCrit = this.queues.get(RequestPriority.LIVE_TURN)?.length ?? 0;
+    const qInter = (this.queues.get(RequestPriority.TOOL_CONTINUATION)?.length ?? 0) + (this.queues.get(RequestPriority.VERIFIER)?.length ?? 0);
     const qBack = this.queues.get(RequestPriority.BACKGROUND)?.length ?? 0;
 
     return {

@@ -24,6 +24,7 @@ import type {
 } from './types.js';
 import { crawlDirectory } from './search.js';
 import { isBinaryBuffer } from './read-file.js';
+import { detectWorkspaceProject } from '../config/index.js';
 
 interface ExtractedSymbols {
   definitions: SymbolTag[];
@@ -287,7 +288,19 @@ export function generateRepoMap(options: RepoMapOptions): RepoMapResult {
   const repoPath = options.repoPath || process.cwd();
   const maxTokens = options.maxTokens || 1024;
 
-  const allRelFiles = crawlDirectory(repoPath, '');
+  // Workspace safety check: do not crawl or index user home or system directories
+  const safety = detectWorkspaceProject(repoPath);
+  if (safety.isHome || safety.isDriveRoot || safety.isSystemDir || !safety.isProject) {
+    return {
+      mapText: `(RepoMap disabled: ${safety.warning || 'Workspace is not a project directory.'})`,
+      tokenEstimate: 20,
+      totalFilesIndexed: 0,
+      filesIndexed: 0,
+      totalSymbols: 0,
+    };
+  }
+
+  const allRelFiles = crawlDirectory(repoPath, '', undefined, 500);
   const candidateFiles: string[] = [];
   const fileSymbols = new Map<string, ExtractedSymbols>();
 

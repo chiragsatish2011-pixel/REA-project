@@ -12,6 +12,7 @@ export interface ToolExecutionContext {
   sessionID?: string;
   agentID?: string;
   worktreePath: string;
+  workdir?: string;
   callID?: string;
   abortSignal?: AbortSignal;
   role?: string;
@@ -251,5 +252,6 @@ export interface RepoMapResult {
   mapText: string;
   tokenEstimate: number;
   totalFilesIndexed: number;
+  filesIndexed?: number;
   totalSymbols: number;
 }

@@ -107,37 +107,66 @@ function normalizeRelativePath(relPath: string): string {
 }
 
 /**
- * Recursively scans directory collecting all relative file paths.
+ * Recursively scans directory collecting all relative file paths,
+ * with strict file count limits and .gitignore compliance to prevent freezing on large directories.
  */
 export function crawlDirectory(
   rootDir: string,
   currentRelDir: string = '',
-  ignoredDirs: Set<string> = DEFAULT_IGNORED_DIRS
+  ignoredDirs: Set<string> = DEFAULT_IGNORED_DIRS,
+  maxFiles: number = 1000
 ): string[] {
   const currentAbsDir = currentRelDir ? path.join(rootDir, currentRelDir) : rootDir;
   if (!fs.existsSync(currentAbsDir)) return [];
 
   const results: string[] = [];
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(currentAbsDir, { withFileTypes: true });
-  } catch {
-    return results;
+
+  // Parse .gitignore if at root
+  const gitignorePatterns: RegExp[] = [];
+  if (!currentRelDir && fs.existsSync(path.join(rootDir, '.gitignore'))) {
+    try {
+      const gitignoreContent = fs.readFileSync(path.join(rootDir, '.gitignore'), 'utf8');
+      const lines = gitignoreContent.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+      for (const line of lines) {
+        try {
+          gitignorePatterns.push(globToRegex(line));
+        } catch (_) {}
+      }
+    } catch (_) {}
   }
 
-  for (const entry of entries) {
-    const entryName = entry.name;
-    const relItemPath = currentRelDir ? path.join(currentRelDir, entryName) : entryName;
+  function walk(relDir: string): void {
+    if (results.length >= maxFiles) return;
+    const absDir = relDir ? path.join(rootDir, relDir) : rootDir;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
 
-    if (entry.isDirectory()) {
-      if (!ignoredDirs.has(entryName)) {
-        results.push(...crawlDirectory(rootDir, relItemPath, ignoredDirs));
+    for (const entry of entries) {
+      if (results.length >= maxFiles) return;
+      const entryName = entry.name;
+      const relPath = relDir ? path.join(relDir, entryName) : entryName;
+      const normRel = relPath.replace(/\\/g, '/');
+
+      // Check gitignore patterns
+      if (gitignorePatterns.some((re) => re.test(normRel) || re.test(entryName))) {
+        continue;
       }
-    } else if (entry.isFile() || entry.isSymbolicLink()) {
-      results.push(relItemPath);
+
+      if (entry.isDirectory()) {
+        if (!ignoredDirs.has(entryName)) {
+          walk(relPath);
+        }
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        results.push(relPath);
+      }
     }
   }
 
+  walk(currentRelDir);
   return results;
 }
 

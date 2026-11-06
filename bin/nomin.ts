@@ -16,9 +16,12 @@ import { SwarmCoordinator } from '../src/swarm/coordinator.js';
 import { ReplServer } from '../src/cli/repl.js';
 import { UI, ANSI } from '../src/cli/ui.js';
 import { NominHttpClient } from '../src/provider/client.js';
+import { NominDoctor } from '../src/cli/doctor.js';
+import { ModelValidator } from '../src/provider/model-validator.js';
+import { BuildStampEngine } from '../src/config/build-stamp.js';
 
 export interface CliArgs {
-  subcommand?: 'setup' | 'model' | 'mode' | 'team';
+  subcommand?: 'setup' | 'model' | 'mode' | 'team' | 'doctor' | 'status';
   subcommandArgs?: string[];
   model?: string;
   provider?: string;
@@ -29,6 +32,7 @@ export interface CliArgs {
   concurrency?: number;
   help: boolean;
   version: boolean;
+  json: boolean;
 }
 
 export function parseArgs(args: string[]): CliArgs {
@@ -36,6 +40,7 @@ export function parseArgs(args: string[]): CliArgs {
     headless: false,
     help: false,
     version: false,
+    json: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -47,6 +52,8 @@ export function parseArgs(args: string[]): CliArgs {
       parsed.version = true;
     } else if (arg === '--headless') {
       parsed.headless = true;
+    } else if (arg === '--json') {
+      parsed.json = true;
     } else if (arg === '--model' && i + 1 < args.length) {
       parsed.model = args[++i];
     } else if (arg === '--provider' && i + 1 < args.length) {
@@ -61,9 +68,12 @@ export function parseArgs(args: string[]): CliArgs {
       parsed.concurrency = parseInt(args[++i], 10);
     } else if (!arg.startsWith('-')) {
       // Check for first-level subcommands
-      if (!parsed.subcommand && ['setup', 'model', 'mode', 'team'].includes(arg)) {
+      if (!parsed.subcommand && ['setup', 'model', 'mode', 'team', 'doctor', 'status'].includes(arg)) {
         parsed.subcommand = arg as any;
-        parsed.subcommandArgs = args.slice(i + 1);
+        const remaining = args.slice(i + 1);
+        parsed.subcommandArgs = remaining.filter(a => !a.startsWith('-'));
+        if (remaining.includes('--json')) parsed.json = true;
+        if (remaining.includes('--help') || remaining.includes('-h')) parsed.help = true;
         break;
       }
 
@@ -97,6 +107,8 @@ ${ANSI.dim}Model-agnostic swarm runtime for NVIDIA NIM and OpenAI-compatible end
 ${ANSI.bold}USAGE:${ANSI.reset}
   nomin [OPTIONS] [path] [task]
   nomin setup
+  nomin doctor [--json]
+  nomin status [--json]
   nomin model <list|add|remove> [model-id]
   nomin mode <solo|team>
   nomin team set <role>=<model-id>
@@ -105,9 +117,11 @@ ${ANSI.bold}USAGE:${ANSI.reset}
   nomin --task "Implement feature X" --headless
 
 ${ANSI.bold}SUBCOMMANDS:${ANSI.reset}
+  ${ANSI.cyan}doctor${ANSI.reset}                         Run diagnostics on credentials, network, models, safety
+  ${ANSI.cyan}status${ANSI.reset}                         Display active provider, model, swarm mode, and pool
   ${ANSI.cyan}setup${ANSI.reset}                          Interactive setup: connect NIM API key & pick models
   ${ANSI.cyan}model list${ANSI.reset}                     List your selected models and live NIM catalog
-  ${ANSI.cyan}model add <id>${ANSI.reset}                 Add a model from NIM catalog to your pool
+  ${ANSI.cyan}model add <id>${ANSI.reset}                 Add a model from NIM catalog to your pool (with live probe)
   ${ANSI.cyan}model remove <id>${ANSI.reset}              Remove a model from your pool
   ${ANSI.cyan}mode <solo|team>${ANSI.reset}               Switch between SOLO (1 model) and TEAM (2-5 agents)
   ${ANSI.cyan}team set <role>=<id>${ANSI.reset}           Assign a model to a team role (e.g. coder=<id>)
@@ -115,6 +129,7 @@ ${ANSI.bold}SUBCOMMANDS:${ANSI.reset}
 ${ANSI.bold}OPTIONS:${ANSI.reset}
   ${ANSI.cyan}--task <string>${ANSI.reset}                 The prompt / goal to execute
   ${ANSI.cyan}--headless${ANSI.reset}                      Run non-interactively and exit with status code (CI/CD mode)
+  ${ANSI.cyan}--json${ANSI.reset}                          Output status or doctor diagnostics as machine-readable JSON
   ${ANSI.cyan}--provider <name>${ANSI.reset}               Provider endpoint (nim, openai, deepseek, ollama, vllm)
   ${ANSI.cyan}--model <model-id>${ANSI.reset}              Model override for swarm workers
   ${ANSI.cyan}--api-key <key>${ANSI.reset}                 API Key for active provider
@@ -241,8 +256,43 @@ async function handleModelCommand(subargs: string[], workdir: string): Promise<v
         console.log(`\n  ${ANSI.red}Error: Model ID required. Usage: nomin model add <model-id>${ANSI.reset}\n`);
         return;
       }
+
+      const cfg = configManager.getConfig();
+      const activeProv = cfg.providers[cfg.activeProvider] || {
+        id: cfg.activeProvider,
+        name: cfg.activeProvider.toUpperCase(),
+        baseUrl: 'https://integrate.api.nvidia.com/v1',
+      };
+      const apiKey = activeProv.apiKey || process.env.NVIDIA_API_KEY || process.env.OPENAI_API_KEY || '';
+
+      const client = new NominHttpClient({
+        config: {
+          id: cfg.activeProvider,
+          name: activeProv.name,
+          type: (cfg.activeProvider === 'nim' ? 'nvidia-nim' : 'openai') as any,
+          baseURL: activeProv.baseUrl,
+          apiKey,
+        },
+      });
+
+      console.log(`\n  ${ANSI.dim}Verifying model '${targetId}' with live probe...${ANSI.reset}`);
+      const verifyRes = await ModelValidator.validateModel(client, targetId);
+      client.destroy();
+
+      if (!verifyRes.ok) {
+        const statusStr = verifyRes.error?.statusCode ? `[HTTP ${verifyRes.error.statusCode}] ` : '';
+        const detailStr = verifyRes.error?.providerDetail || 'Probe completion failed';
+        console.log(`\n  ${ANSI.red}✖ Model verification failed: ${statusStr}${detailStr}${ANSI.reset}`);
+        if (verifyRes.error?.category === 'MODEL_RETIRED') {
+          console.log(`  ${ANSI.yellow}Notice: This model has reached end of life and cannot be added.${ANSI.reset}`);
+        }
+        console.log(`  ${ANSI.dim}The model was not added to your pool.${ANSI.reset}\n`);
+        return;
+      }
+
+      console.log(`  ${ANSI.green}✔ Verification passed! TTFT: ${verifyRes.ttftMs}ms, tools: ${verifyRes.supportsTools ? 'yes' : 'no'}, reasoning: ${verifyRes.supportsReasoning ? 'yes' : 'no'}${ANSI.reset}`);
       configManager.addModel(targetId);
-      console.log(`\n  ${ANSI.green}✔ Added model '${targetId}' to pool.${ANSI.reset}\n`);
+      console.log(`  ${ANSI.green}✔ Added model '${targetId}' to pool.${ANSI.reset}\n`);
       break;
     }
 
@@ -309,11 +359,76 @@ async function handleTeamCommand(subargs: string[], workdir: string): Promise<vo
   }
 }
 
+async function handleStatusCommand(workdir: string, asJson: boolean): Promise<void> {
+  const configManager = ConfigManager.getInstance(workdir);
+  const cfg = configManager.getConfig();
+  const prov = cfg.providers[cfg.activeProvider] || { id: cfg.activeProvider, baseUrl: '' };
+  const settings = (cfg.modelSettings || {})[cfg.activeModel || ''] || {};
+
+  const statusData = {
+    activeProvider: cfg.activeProvider,
+    providerBaseUrl: prov.baseUrl,
+    mode: cfg.mode,
+    activeModel: cfg.activeModel || null,
+    roles: cfg.roles || {},
+    selectedModels: cfg.selectedModels || [],
+    retiredModels: cfg.retiredModels || [],
+    settings: {
+      reasoningEffort: settings.reasoningEffort || 'not configured',
+      temperature: settings.temperature ?? 'provider default',
+      topP: settings.topP ?? 'provider default',
+      maxOutputTokens: settings.maxOutputTokens ?? 'provider default',
+    },
+    fallbackChains: cfg.fallbackChains || {},
+    workspace: {
+      workdir: cfg.workdir,
+      isSystemDir: cfg.isSystemDir,
+      stateDir: cfg.stateDir,
+    },
+  };
+
+  if (asJson) {
+    console.log(JSON.stringify(statusData, null, 2));
+    return;
+  }
+
+  console.log(`\n  ${ANSI.bold}◈ NOMIN CODE STATUS${ANSI.reset}`);
+  console.log(`  ${ANSI.dim}Provider:${ANSI.reset}       ${ANSI.brightCyan}${cfg.activeProvider.toUpperCase()}${ANSI.reset} (${prov.baseUrl})`);
+  console.log(`  ${ANSI.dim}Swarm Mode:${ANSI.reset}     ${ANSI.cyan}${cfg.mode.toUpperCase()}${ANSI.reset}`);
+  if (cfg.mode === 'solo') {
+    console.log(`  ${ANSI.dim}Active Model:${ANSI.reset}   ${ANSI.brightWhite}${cfg.activeModel || '(none selected)'}${ANSI.reset}`);
+  } else {
+    console.log(`  ${ANSI.dim}Team Roles:${ANSI.reset}`);
+    for (const [r, m] of Object.entries(cfg.roles || {})) {
+      console.log(`    • ${ANSI.cyan}${r}:${ANSI.reset} ${m}`);
+    }
+  }
+  console.log(`  ${ANSI.dim}Pool Count:${ANSI.reset}     ${cfg.selectedModels?.length || 0} selected`);
+  console.log(`  ${ANSI.dim}Model Settings:${ANSI.reset} effort=${settings.reasoningEffort || 'default'}, temp=${settings.temperature ?? 'default'}, max_tokens=${settings.maxOutputTokens ?? 'default'}`);
+  const retiredList = Object.keys(cfg.retiredModels || {});
+  if (retiredList.length > 0) {
+    console.log(`  ${ANSI.dim}Retired Models:${ANSI.reset} ${ANSI.coral}${retiredList.join(', ')}${ANSI.reset}`);
+  }
+  console.log(`  ${ANSI.dim}Workspace:${ANSI.reset}      ${cfg.workdir} ${cfg.isSystemDir ? ANSI.yellow + '[System Dir Protected]' + ANSI.reset : ''}\n`);
+}
+
+async function handleDoctorCommand(workdir: string, asJson: boolean): Promise<void> {
+  const report = await NominDoctor.runDiagnostics(workdir);
+  if (asJson) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    NominDoctor.printReport(report);
+  }
+  if (!report.pass) {
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.version) {
-    console.log('@nomincode/cli v1.0.0');
+    console.log(BuildStampEngine.formatStamp());
     process.exit(0);
   }
 
@@ -326,7 +441,13 @@ async function main(): Promise<void> {
   const configManager = ConfigManager.getInstance(workdir);
 
   // Handle dedicated subcommands
-  if (args.subcommand === 'setup') {
+  if (args.subcommand === 'doctor') {
+    await handleDoctorCommand(workdir, args.json);
+    process.exit(0);
+  } else if (args.subcommand === 'status') {
+    await handleStatusCommand(workdir, args.json);
+    process.exit(0);
+  } else if (args.subcommand === 'setup') {
     await runInteractiveSetup(workdir);
     process.exit(0);
   } else if (args.subcommand === 'model') {
@@ -358,11 +479,6 @@ async function main(): Promise<void> {
   }
 
   const cfg = configManager.getConfig();
-
-  if (cfg.isFallbackState) {
-    UI.logAgent('SYSTEM', `${ANSI.yellow}Notice: Running in ${cfg.isSystemDir ? 'system-protected' : 'read-only'} directory.${ANSI.reset}`);
-    UI.logAgent('SYSTEM', `${ANSI.yellow}State safely redirected to: ${cfg.stateDir}${ANSI.reset}`);
-  }
 
   // Check if user has selected at least one model
   const hasModel = configManager.hasConfiguredModel();

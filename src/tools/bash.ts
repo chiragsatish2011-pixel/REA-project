@@ -13,6 +13,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isSystemDir, isDriveRootDir } from '../config/index.js';
 import type {
   Tool,
   ToolExecutionContext,
@@ -258,6 +259,14 @@ export class BashTool implements Tool {
     const workingDir = args.cwd
       ? (path.isAbsolute(args.cwd) ? args.cwd : path.resolve(context.worktreePath, args.cwd))
       : context.worktreePath;
+
+    if (workingDir && (isSystemDir(workingDir) || isDriveRootDir(workingDir))) {
+      return {
+        success: false,
+        output: '',
+        error: `Refusing to execute command in system-protected directory '${workingDir}'. Please 'cd <project-path>' or start Nomin in a project directory.`,
+      };
+    }
 
     const timeoutSeconds = typeof args.timeout_seconds === 'number' && args.timeout_seconds > 0
       ? args.timeout_seconds

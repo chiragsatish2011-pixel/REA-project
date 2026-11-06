@@ -1,72 +1,70 @@
 /**
- * Nomin Code: Claude Code & OpenCode Inspired Terminal UX & Styling
+ * Nomin Code: Clean Terminal UX & Styling
  * 
- * Features clean hairlines, warm cozy color tokens, Claude Code thinking blocks,
- * tool invocation callouts, unified diff previews with syntax highlights,
- * markdown terminal renderer, token/cost tracking cards, and multi-agent swarm dashboards.
+ * Features quiet whitespace, calm typography, single status line,
+ * collapsed tool one-liners, unified diff previews, and zero nested box borders.
  * Zero external dependencies — pure Node.js standard library.
  */
 
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { isSystemDirectory } from '../config/index.js';
+import { isSystemDirectory, type ProviderEndpointConfig } from '../config/index.js';
+import { BuildStampEngine } from '../config/build-stamp.js';
+import { ANSI } from './ansi.js';
+import { ThemeManager } from './theme.js';
+import { StatusLine, type StatusLineProps } from './components/status-line.js';
+import { FooterHints, type KeyHint } from './components/footer-hints.js';
+import { DiffViewer } from './components/diff-viewer.js';
 
-export const ANSI = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  italic: '\x1b[3m',
-  underline: '\x1b[4m',
-  inverse: '\x1b[7m',
+export { ANSI } from './ansi.js';
 
-  // Foreground
-  black: '\x1b[30m',
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  magenta: '\x1b[35m',
-  cyan: '\x1b[36m',
-  white: '\x1b[37m',
-  gray: '\x1b[90m',
+export interface SlashCommandItem {
+  name: string;
+  category: 'Core' | 'Swarm' | 'Provider & Models' | 'Tools & Diagnostics';
+  description: string;
+  syntax?: string;
+}
 
-  // Bright Foreground
-  brightRed: '\x1b[91m',
-  brightGreen: '\x1b[92m',
-  brightYellow: '\x1b[93m',
-  brightBlue: '\x1b[94m',
-  brightMagenta: '\x1b[95m',
-  brightCyan: '\x1b[96m',
-  brightWhite: '\x1b[97m',
-
-  // Cozy 256-Color Claude Code & OpenCode Palette
-  amber: '\x1b[38;5;215m',        // Warm Claude Code peach/amber
-  coral: '\x1b[38;5;203m',        // Accent coral
-  mint: '\x1b[38;5;114m',         // Fresh code green
-  sky: '\x1b[38;5;111m',          // Soft informative blue
-  lavender: '\x1b[38;5;176m',     // Muted purple / verifier
-  gold: '\x1b[38;5;221m',         // Warning / tester yellow
-  slate: '\x1b[38;5;244m',        // Neutral secondary text
-  darkSlate: '\x1b[38;5;240m',    // Subtle hairline borders
-  borderMuted: '\x1b[38;5;238m',  // Very soft line border
-  codeHighlight: '\x1b[38;5;153m',// Inline code variable
-
-  // Backgrounds
-  bgBlack: '\x1b[40m',
-  bgDark: '\x1b[48;5;235m',
-  bgCard: '\x1b[48;5;236m',
-  bgChip: '\x1b[48;5;237m',
-  bgCyan: '\x1b[46m',
-  bgBlue: '\x1b[44m',
-  bgGreenMuted: '\x1b[48;5;22m',
-  bgRedMuted: '\x1b[48;5;52m',
-
-  // Cursor & clear
-  clearLine: '\x1b[2K\r',
-  clearScreen: '\x1b[2J\x1b[3J\x1b[H',
-  hideCursor: '\x1b[?25l',
-  showCursor: '\x1b[?25h',
-};
+export const SLASH_COMMANDS: SlashCommandItem[] = [
+  { name: '/help', category: 'Core', description: 'Display all available slash commands & guide', syntax: '/help' },
+  { name: '/chat', category: 'Core', description: 'Force direct conversational turn with model (no planning or swarm)', syntax: '/chat <message>' },
+  { name: '/plan', category: 'Swarm', description: 'Force multi-agent Architect planning & swarm decomposition', syntax: '/plan <task>' },
+  { name: '/undo', category: 'Tools & Diagnostics', description: 'Undo last git commit created by Nomin Code', syntax: '/undo' },
+  { name: '/redo', category: 'Tools & Diagnostics', description: 'Redo previously undone commit', syntax: '/redo' },
+  { name: '/rewind', category: 'Core', description: 'Rewind conversation context and file changes', syntax: '/rewind' },
+  { name: '/stop', category: 'Core', description: 'Stop and abort active streaming or swarm task', syntax: '/stop' },
+  { name: '/provider', category: 'Provider & Models', description: 'Switch or configure LLM Provider (NIM, OpenAI, Anthropic...)', syntax: '/provider' },
+  { name: '/key', category: 'Provider & Models', description: 'Set or update provider API key (paste supported)', syntax: '/key <api-key>' },
+  { name: '/model', category: 'Provider & Models', description: 'Interactive arrow-key model switcher', syntax: '/model' },
+  { name: '/models', category: 'Provider & Models', description: 'Open live model catalog browser', syntax: '/models' },
+  { name: '/effort', category: 'Provider & Models', description: 'Configure reasoning effort & thinking budget (off, low, medium, high, max)', syntax: '/effort' },
+  { name: '/mode', category: 'Swarm', description: 'Switch between SOLO (1 agent) and TEAM (multi-agent) mode', syntax: '/mode <solo|team>' },
+  { name: '/team', category: 'Swarm', description: 'Assign models to swarm roles (architect, coder, tester, verifier)', syntax: '/team' },
+  { name: '/status', category: 'Swarm', description: 'View active Swarm Task DAG and agent execution statuses', syntax: '/status' },
+  { name: '/board', category: 'Swarm', description: 'Full-screen Blackboard state & DoD acceptance criteria', syntax: '/board' },
+  { name: '/compact', category: 'Swarm', description: 'Proactively compact context window', syntax: '/compact' },
+  { name: '/cost', category: 'Provider & Models', description: 'View session token usage, turns, and estimated spend', syntax: '/cost' },
+  { name: '/config', category: 'Provider & Models', description: 'Display provider rate quotas, endpoints, and credentials', syntax: '/config' },
+  { name: '/permissions', category: 'Core', description: 'Interactive permission rule editor & policy manager', syntax: '/permissions' },
+  { name: '/mcp', category: 'Tools & Diagnostics', description: 'Configure Model Context Protocol servers', syntax: '/mcp' },
+  { name: '/agents', category: 'Swarm', description: 'Manage background and swarm agents', syntax: '/agents' },
+  { name: '/hooks', category: 'Tools & Diagnostics', description: 'Configure pre/post turn lifecycle hooks', syntax: '/hooks' },
+  { name: '/review', category: 'Tools & Diagnostics', description: 'Run fresh-context Verifier Gate code review', syntax: '/review' },
+  { name: '/doctor', category: 'Tools & Diagnostics', description: 'Run system environment and connectivity diagnostics', syntax: '/doctor' },
+  { name: '/init', category: 'Core', description: 'Generate starter guidelines in workspace', syntax: '/init' },
+  { name: '/memory', category: 'Core', description: 'View or edit workspace memory guidelines', syntax: '/memory' },
+  { name: '/export', category: 'Core', description: 'Export session conversation transcript', syntax: '/export' },
+  { name: '/resume', category: 'Core', description: 'Interactive session history & resume picker', syntax: '/resume' },
+  { name: '/theme', category: 'Core', description: 'Switch color theme (dark, light, high-contrast, colorblind)', syntax: '/theme' },
+  { name: '/vim', category: 'Core', description: 'Toggle vim-style modal input navigation', syntax: '/vim' },
+  { name: '/cd', category: 'Core', description: 'Switch workspace directory & git branch', syntax: '/cd <path>' },
+  { name: '/new', category: 'Core', description: 'Create new project folder & switch workspace', syntax: '/new <name>' },
+  { name: '/version', category: 'Core', description: 'Display exact build stamp, commit hash & entry binary', syntax: '/version' },
+  { name: '/repomap', category: 'Tools & Diagnostics', description: 'Generate PageRank symbol outline of repository', syntax: '/repomap' },
+  { name: '/diff', category: 'Tools & Diagnostics', description: 'Inspect staged worktree git diffs across swarm', syntax: '/diff' },
+  { name: '/clear', category: 'Core', description: 'Clear the terminal screen', syntax: '/clear' },
+  { name: '/exit', category: 'Core', description: 'Exit Nomin Code session', syntax: '/exit' },
+];
 
 export interface BootingTelemetry {
   version: string;
@@ -78,6 +76,7 @@ export interface BootingTelemetry {
   activeModel?: string;
   roles?: Record<string, string>;
   selectedModels?: string[];
+  reasoningEffort?: string;
   rpmLimit: number;
   tpmLimit: number;
   concurrency: number;
@@ -110,10 +109,11 @@ export class TerminalUI {
     } catch (_) {}
 
     TerminalUI.spinnerInterval = setInterval(() => {
+      const c = ThemeManager.getColors();
       const frame = TerminalUI.spinnerFrames[TerminalUI.spinnerIdx % TerminalUI.spinnerFrames.length];
       TerminalUI.spinnerIdx++;
       try {
-        process.stdout.write(`${ANSI.clearLine}  ${ANSI.amber}${frame}${ANSI.reset} ${ANSI.dim}${TerminalUI.currentSpinnerLabel}${ANSI.reset}`);
+        process.stdout.write(`${ANSI.clearLine}  ${c.accent}${frame}${c.reset} ${c.secondary}${TerminalUI.currentSpinnerLabel}${c.reset}`);
       } catch (_) {}
     }, 80);
   }
@@ -190,52 +190,66 @@ export class TerminalUI {
   }
 
   /**
-   * Prints the sleek model-agnostic booting banner styled after Claude Code and OpenCode.
+   * Prints the single sleek, compact Unicode header card (Claude Code / OpenCode standard).
+   * Collapses workspace warnings into a single inline badge with zero redundant paragraphs.
    */
   public static printBootSequence(telemetry: BootingTelemetry): void {
-    const w = TerminalUI.width();
+    const c = ThemeManager.getColors();
+    const isSys = isSystemDirectory(telemetry.workdir);
 
-    console.log();
-    // Warm top brand title
-    console.log(`  ${ANSI.bold}${ANSI.amber}◈ NOMIN CODE${ANSI.reset}  ${ANSI.slate}v${telemetry.version}${ANSI.reset}  ${ANSI.dim}— Model-Agnostic Autonomous Coding Swarm${ANSI.reset}`);
-    console.log(`  ${ANSI.slate}NVIDIA NIM & OpenAI Compatible Endpoints · 100% User-Controlled Models${ANSI.reset}`);
-    console.log();
+    const modeBadge = telemetry.mode === 'team' ? 'TEAM' : 'SOLO';
+    let model = telemetry.activeModel;
+    if (!model || model === 'undefined' || model === 'none') {
+      if (telemetry.roles) {
+        const validRole = Object.values(telemetry.roles).find(v => v && v !== 'undefined' && v !== 'none');
+        if (validRole) model = validRole;
+      }
+    }
+    const hasModel = Boolean(model && model !== 'undefined' && model !== 'none');
+    const modelDisplay = hasModel ? `${c.text}${model}${c.reset}` : `${c.secondary}(no model selected)${c.reset}`;
+    const modelPlain = hasModel ? model! : '(no model selected)';
+    const branch = telemetry.gitBranch && telemetry.gitBranch !== '(none - not a git repository)'
+      ? ` (${telemetry.gitBranch})`
+      : '';
 
-    // Boxed Telemetry Card with rounded hairlines
-    const headerBorder = '─'.repeat(Math.max(0, w - 24));
-    console.log(`  ${ANSI.darkSlate}╭─ System Telemetry ${headerBorder}╮${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Provider:${ANSI.reset}   ${telemetry.providerName} ${ANSI.dim}(${telemetry.providerUrl})${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Workspace:${ANSI.reset}  ${telemetry.workdir} ${ANSI.dim}[branch: ${telemetry.gitBranch || 'main'}]${ANSI.reset}`);
+    const stamp = BuildStampEngine.getStamp();
 
-    const hasRoles = telemetry.roles && Object.keys(telemetry.roles).length > 0;
-    const hasModel = Boolean(telemetry.activeModel) || hasRoles;
+    // Line 1: ◈ NOMIN CODE v1.0.0 [commit] · [Provider] · Model · Mode
+    const l1Left = `${c.accent}${c.bold}◈ NOMIN CODE${c.reset} ${c.secondary}v${telemetry.version} [${stamp.commitHash}]${c.reset} ${c.border}·${c.reset} ${c.info}[${telemetry.providerName}]${c.reset} ${c.border}·${c.reset} ${modelDisplay} ${c.border}·${c.reset} ${c.success}${modeBadge}${c.reset}`;
+    const l1Plain = `◈ NOMIN CODE v${telemetry.version} [${stamp.commitHash}] · [${telemetry.providerName}] · ${modelPlain} · ${modeBadge}`;
 
-    if (!hasModel) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.gold}● Mode:${ANSI.reset}       SETUP REQUIRED`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.gold}● Models:${ANSI.reset}     ⚠️  No models selected.`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}                ${ANSI.dim}Run 'nomin setup' or 'nomin model add <model-id>' to select models.${ANSI.reset}`);
-    } else if (telemetry.mode === 'team' || (!telemetry.mode && hasRoles)) {
-      const roleKeys = Object.keys(telemetry.roles || {});
-      const roleSummary = roleKeys
-        .map(k => `${k}: ${ANSI.brightCyan}${telemetry.roles![k]}${ANSI.reset}`)
-        .join(' | ');
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Mode:${ANSI.reset}       TEAM [${roleKeys.length} Agents · Shared Blackboard & Mailbox]`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Roles:${ANSI.reset}      ${roleSummary || ANSI.dim + '(unassigned)' + ANSI.reset}`);
-    } else {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Mode:${ANSI.reset}       SOLO [1 Model · Fresh-Context Verifier Gate]`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Model:${ANSI.reset}      ${ANSI.amber}${telemetry.activeModel || 'default'}${ANSI.reset}`);
+    // Line 2: Workspace: <path> (optional branch) [· ⚠ Sandboxed (~/.nomin) · Use /cd <path>]
+    let l2Left = `${c.secondary}Workspace:${c.reset} ${c.text}${telemetry.workdir}${branch}${c.reset}`;
+    let l2Plain = `Workspace: ${telemetry.workdir}${branch}`;
+    if (isSys) {
+      l2Left += ` ${c.border}·${c.reset} ${c.warning}⚠ Sandboxed (~/.nomin) · Use /cd <path>${c.reset}`;
+      l2Plain += ` · ⚠ Sandboxed (~/.nomin) · Use /cd <path>`;
     }
 
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Gateways:${ANSI.reset}   ${ANSI.mint}[DoD Evidence Gate]${ANSI.reset} ${ANSI.gold}[Grok TodoGate]${ANSI.reset} ${ANSI.sky}[PageRank RepoMap]${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Limits:${ANSI.reset}     ${telemetry.rpmLimit} RPM · ${telemetry.tpmLimit.toLocaleString()} TPM · Concurrency Cap: ${telemetry.concurrency}`);
-    
-    if (isSystemDirectory(telemetry.workdir)) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.gold}⚠️ Running in system directory. Workspace state sandboxed to ~/.nomin.${ANSI.reset}`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.amber}💡 Tip: Use 'cd <path>' or start with 'nomin <path>' to work on a project.${ANSI.reset}`);
-    }
+    const termWidth = process.stdout.columns || 80;
+    const cardWidth = Math.max(76, Math.min(termWidth - 4, Math.max(l1Plain.length, l2Plain.length) + 6));
+    const pad1 = ' '.repeat(Math.max(0, cardWidth - 6 - l1Plain.length));
+    const pad2 = ' '.repeat(Math.max(0, cardWidth - 6 - l2Plain.length));
 
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+    console.log();
+    // OpenCode top tab bar
+    const projectName = path.basename(telemetry.workdir) || 'Workspace';
+    const activeTab = `.: ${projectName}`;
+    console.log(`  ${c.secondary}Multi-agent coding swarm on${c.reset}  ${c.bgHighlight || '\x1b[48;2;36;41;46m'}${c.bold}${c.text} ${activeTab} ${c.reset}  ${c.secondary}New session   +${c.reset}`);
+    console.log(`  ${c.border}╭─ ${l1Left} ${pad1}${c.border}─╮${c.reset}`);
+    console.log(`  ${c.border}╰─ ${l2Left} ${pad2}${c.border}─╯${c.reset}`);
+
+    // Centered OpenCode-style retro-modern chunky block logo (aligned with header card)
+    const logoL1 = '█▄ █ █▀█ █▀▄▀█ █ █▄ █   █▀▀ █▀█ █▀▄ █▀▀';
+    const logoL2 = '█ ▀█ █▄█ █ ▀ █ █ █ ▀█   █▄▄ █▄█ █▄▀ ██▄';
+    const logoMargin = Math.max(2, 2 + Math.floor((cardWidth - 39) / 2));
+    const padLogo = ' '.repeat(logoMargin);
+    const logoColor = c.text || '\x1b[38;2;220;220;220m';
+    const dimLogoColor = c.secondary || '\x1b[38;2;140;140;140m';
+
+    console.log();
+    console.log(`${padLogo}${c.bold}${logoColor}${logoL1}${c.reset}`);
+    console.log(`${padLogo}${dimLogoColor}${logoL2}${c.reset}`);
     console.log();
   }
 
@@ -243,253 +257,189 @@ export class TerminalUI {
    * Renders a system directory sandboxing tip warning.
    */
   public static renderSystemDirWarning(): void {
-    console.log(`  ${ANSI.gold}⚠️ Running in system directory. Workspace state sandboxed to ~/.nomin.${ANSI.reset}`);
-    console.log(`  ${ANSI.amber}💡 Tip: Use 'cd <path>' or start with 'nomin <path>' to work on a project.${ANSI.reset}\n`);
+    const c = ThemeManager.getColors();
+    console.log(`  ${c.warning}⚠️  Running in system directory. Workspace state sandboxed to ~/.nomin.${c.reset}`);
+    console.log(`  ${c.accent}💡 Tip: Use 'cd <path>' or start with 'nomin <path>' to work on a project.${c.reset}\n`);
   }
 
   /**
    * Renders the dynamic directory switch card.
    */
   public static renderWorkspaceSwitchedCard(workdir: string, gitBranch: string): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 26));
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ [WORKSPACE SWITCHED] ${border}╮${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● New Working Directory:${ANSI.reset} ${workdir}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}● Active Branch:${ANSI.reset}          ${gitBranch}`);
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+    console.log(`  ${c.success}● Workspace switched:${c.reset} ${c.text}${workdir}${c.reset}  ${c.secondary}[branch: ${gitBranch}]${c.reset}`);
     console.log();
   }
 
-  /**
-   * Renders the boxed message bar prompt header (Claude Code style).
-   */
   public static renderMessageBarHeader(): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 46));
-    console.log(`  ${ANSI.darkSlate}╭─ Message ─ ${ANSI.dim}(Enter goal or /help for commands)${ANSI.darkSlate} ${border}╮${ANSI.reset}`);
+    // Quiet hairline indicator
   }
 
-  /**
-   * Renders the boxed message bar prompt footer.
-   */
   public static renderMessageBarFooter(): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 60));
-    console.log(`  ${ANSI.darkSlate}╰─ ${ANSI.dim}[Ctrl+C Exit] [/cd] [/status] [/cost] [/repomap] [/models]${ANSI.darkSlate} ${border}╯${ANSI.reset}`);
-    console.log();
+    // Dim hints line
   }
 
-  /**
-   * Claude Code style boxed prompt frame.
-   */
   public static renderPromptBox(options?: { promptText?: string; tokenStats?: string; branch?: string }): void {
-    const w = TerminalUI.width();
-    const branch = options?.branch ? ` (${options.branch})` : '';
-    const stats = options?.tokenStats ? ` ${options.tokenStats}` : '';
-    const headerTitle = ` Prompt${branch}${stats} `;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(headerTitle).length - 6);
-
-    console.log(`  ${ANSI.darkSlate}╭─${ANSI.amber}${headerTitle}${ANSI.darkSlate}${'─'.repeat(lineLen)}╮${ANSI.reset}`);
+    // Minimal prompt separator
   }
 
   /**
    * Renders a real-time status line / pill.
    */
   public static renderStatusBar(info: { mode: string; model: string; branch: string; tokens: number; costUsd: number; status: string }): void {
+    const c = ThemeManager.getColors();
     const tokenStr = info.tokens >= 1000 ? `${(info.tokens / 1000).toFixed(1)}k` : `${info.tokens}`;
     const costStr = `$${info.costUsd.toFixed(4)}`;
-    const line = `[◈ NOMIN · ${info.mode.toUpperCase()} · ${info.model} · ⎇ ${info.branch} · ${tokenStr} tok (${costStr}) · ${info.status}]`;
-    console.log(`  ${ANSI.dim}${ANSI.slate}${line}${ANSI.reset}`);
+    console.log(`  ${c.secondary}[${c.accent}◈ NOMIN${c.reset} ${c.border}·${c.reset} ${c.info}${info.mode.toUpperCase()}${c.reset} ${c.border}·${c.reset} ${c.text}${info.model}${c.reset} ${c.border}·${c.reset} ${c.secondary}⎇ ${info.branch}${c.reset} ${c.border}·${c.reset} ${c.secondary}${tokenStr} tok (${costStr})${c.reset} ${c.border}·${c.reset} ${c.success}${info.status}${c.reset}${c.secondary}]${c.reset}`);
   }
 
   /**
-   * Renders Claude Code signature "Thinking" reasoning process card.
+   * Renders collapsible thinking process block matching OpenCode standard (+ Thought · 1.5s).
+   * Eliminates emoji spam and internal chain-of-thought dumps.
    */
   public static renderThinking(
     role: string,
     modelName: string,
     thinkingText: string,
-    durationMs?: number
+    durationMs?: number,
+    expanded: boolean = false
   ): void {
-    const w = TerminalUI.width();
-    const durationStr = durationMs !== undefined ? ` · ${(durationMs / 1000).toFixed(1)}s` : '';
-    const title = `💭 Thinking (${role} · ${modelName}${durationStr})`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
+    const c = ThemeManager.getColors();
+    const durSeconds = durationMs !== undefined ? (durationMs / 1000).toFixed(1) : '1.2';
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ${ANSI.lavender}${title}${ANSI.darkSlate} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
+    console.log(`  ${c.amber}+ Thought${c.reset} ${c.secondary}· ${durSeconds}s${c.reset}`);
 
-    const wrapped = TerminalUI.wrapText(thinkingText.trim(), w - 8);
-    const maxLines = 16;
-    const displayLines = wrapped.slice(0, maxLines);
+    const raw = thinkingText.trim();
+    if (!raw) return;
 
-    for (const l of displayLines) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}${ANSI.slate}${l}${ANSI.reset}`);
+    if (expanded) {
+      console.log();
+      const wrapped = TerminalUI.wrapText(raw, TerminalUI.width() - 6);
+      for (const l of wrapped) {
+        console.log(`  ${c.secondary}${l}${c.reset}`);
+      }
+      console.log();
+    } else {
+      // Extract clean high-level summary, filtering out internal meta phrasing
+      const lines = raw.split('\n').map(l => l.trim()).filter(l => Boolean(l));
+      const cleanLine = lines.find(l => !l.toLowerCase().includes('thinking process') && !l.startsWith('I should') && l.length > 10) || lines[0] || '';
+      if (cleanLine && !cleanLine.toLowerCase().includes('thinking process')) {
+        console.log();
+        console.log(`  ${c.text}${TerminalUI.truncate(cleanLine, 90)}${c.reset}`);
+      }
     }
-
-    if (wrapped.length > maxLines) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}... [${wrapped.length - maxLines} lines condensed]${ANSI.reset}`);
-    }
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
   }
 
   /**
-   * Renders Claude Code style dedicated tool invocation callout.
+   * Renders sleek tool call matching OpenCode standard ($ <command> or → Explored).
+   * Eliminates emoji clutter.
    */
   public static renderToolCall(toolName: string, params: Record<string, any>, summary?: string): void {
-    const w = TerminalUI.width();
-    let icon = '⚡';
-    let toolBadge = toolName;
-    let mainParam = '';
-
+    const c = ThemeManager.getColors();
     if (toolName === 'bash') {
-      icon = '⚡';
-      toolBadge = 'Bash';
-      mainParam = params.command || '';
-    } else if (toolName === 'edit_file') {
-      icon = '✏️ ';
-      toolBadge = 'Edit File';
-      mainParam = params.path || '';
-    } else if (toolName === 'read_file') {
-      icon = '📖';
-      toolBadge = 'Read File';
+      const cmd = params.command || '';
+      console.log(`\n  ${c.secondary}$${c.reset} ${c.bold}${c.text}${cmd}${c.reset}`);
+      return;
+    }
+
+    if (toolName === 'read_file') {
       const range = params.start_line ? ` (lines ${params.start_line}-${params.end_line || ''})` : '';
-      mainParam = `${params.path || ''}${range}`;
-    } else if (toolName === 'search' || toolName === 'search_grep') {
-      icon = '🔍';
-      toolBadge = 'Search Grep';
-      mainParam = `"${params.query || ''}"`;
-    } else if (toolName === 'search_glob') {
-      icon = '📁';
-      toolBadge = 'Search Glob';
-      mainParam = `"${params.pattern || ''}"`;
-    } else if (toolName === 'repomap') {
-      icon = '🗺️ ';
-      toolBadge = 'RepoMap';
-      mainParam = params.path || 'PageRank Skeleton';
+      console.log(`  ${c.secondary}→${c.reset} ${c.text}Explored: read ${params.path || ''}${range}${c.reset}`);
+      return;
     }
 
-    const title = `${icon} ${toolBadge}: ${mainParam}`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
-    console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ${ANSI.bold}${ANSI.sky}${title}${ANSI.reset}${ANSI.darkSlate} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
-    if (summary) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}${summary}${ANSI.reset}`);
+    if (toolName === 'search' || toolName === 'search_grep' || toolName === 'search_glob') {
+      const q = params.query || params.pattern || '';
+      console.log(`  ${c.secondary}→${c.reset} ${c.text}Explored: search "${q}"${c.reset}`);
+      return;
     }
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+
+    if (toolName === 'repomap') {
+      console.log(`  ${c.secondary}→${c.reset} ${c.text}Explored: repository symbol map${c.reset}`);
+      return;
+    }
+
+    const sum = summary ? `  ${c.secondary}(${summary})${c.reset}` : '';
+    console.log(`  ${c.secondary}→${c.reset} ${c.text}${toolName}${c.reset}${sum}`);
   }
 
   /**
-   * Renders a tool execution result card with exit code and duration badge.
+   * Renders tool result output matching OpenCode terminal cards.
    */
   public static renderToolResult(
     toolName: string,
     result: { success: boolean; output: string; durationMs?: number; exitCode?: number }
   ): void {
-    const w = TerminalUI.width();
-    const statusIcon = result.success ? `${ANSI.mint}✔ Success${ANSI.reset}` : `${ANSI.coral}✖ Error${ANSI.reset}`;
-    const duration = result.durationMs !== undefined ? ` ${(result.durationMs / 1000).toFixed(2)}s` : '';
-    const exitCodeStr = result.exitCode !== undefined ? ` [code ${result.exitCode}]` : '';
-    const title = `Result: ${toolName} · ${statusIcon}${duration}${exitCodeStr}`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
-    console.log(`  ${ANSI.darkSlate}╭─ ${title}${ANSI.darkSlate} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
-
-    const rawOutput = (result.output || '').trim();
-    if (!rawOutput) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}(no output returned)${ANSI.reset}`);
-    } else {
-      const lines = rawOutput.split('\n');
-      const maxDisplay = 12;
-      const slice = lines.slice(0, maxDisplay);
-      for (const line of slice) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${line}`);
+    const c = ThemeManager.getColors();
+    if (toolName === 'bash') {
+      const raw = (result.output || '').trim();
+      if (!raw) {
+        console.log(`  ${c.secondary}(no output)${c.reset}\n`);
+        return;
       }
-      if (lines.length > maxDisplay) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}... [${lines.length - maxDisplay} lines truncated]${ANSI.reset}`);
+      const lines = raw.split('\n');
+      const maxShow = 15;
+      if (lines.length > maxShow) {
+        console.log(`  ${c.secondary}(${lines.length - maxShow} earlier lines)${c.reset}`);
       }
+      for (const line of lines.slice(-maxShow)) {
+        console.log(`  ${c.text}${line}${c.reset}`);
+      }
+      console.log();
+      return;
     }
 
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
-    console.log();
+    if (!result.success) {
+      console.log(`  ${c.error}✖ ${toolName} failed:${c.reset} ${result.output}`);
+    }
   }
 
   /**
-   * Renders Claude Code style file reading card with syntax dimmed line numbers.
+   * Renders file reading card with syntax line numbers.
    */
   public static renderFileRead(
     filePath: string,
     range: { start: number; end: number; total: number },
     content: string
   ): void {
-    const w = TerminalUI.width();
-    const title = `📖 Read: ${filePath} (lines ${range.start}-${range.end} of ${range.total})`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ${ANSI.sky}${title}${ANSI.darkSlate} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
+    console.log(`  ${c.info}📖 Read: ${filePath}${c.reset} ${c.secondary}(lines ${range.start}-${range.end} of ${range.total})${c.reset}`);
 
     const lines = content.split('\n');
     let lineNum = range.start;
-    const maxShow = 20;
+    const maxShow = 12;
 
     for (let i = 0; i < Math.min(lines.length, maxShow); i++) {
       const numStr = String(lineNum + i).padStart(4, ' ');
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.darkSlate}${numStr} │${ANSI.reset} ${lines[i]}`);
+      console.log(`    ${c.border}${numStr} │${c.reset} ${lines[i]}`);
     }
 
     if (lines.length > maxShow) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}     ... [${lines.length - maxShow} more lines]${ANSI.reset}`);
+      console.log(`    ${c.secondary}... [${lines.length - maxShow} more lines]${c.reset}`);
     }
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
 
   /**
-   * Renders Claude Code style file modification card with statistics and diff preview.
+   * Renders file edit matching OpenCode standard (← Edit <path> with line-numbered gutters & row tints).
    */
   public static renderFileEdit(
     filePath: string,
     diffText: string,
     stats?: { added: number; removed: number }
   ): void {
-    const w = TerminalUI.width();
-    const addedStr = stats ? ` ${ANSI.mint}+${stats.added}${ANSI.reset}` : '';
-    const removedStr = stats ? ` ${ANSI.coral}-${stats.removed}${ANSI.reset}` : '';
-    const title = `✏️  Edit: ${filePath}${addedStr}${removedStr}`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ${ANSI.amber}${title}${ANSI.darkSlate} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
-
-    if (diffText && diffText.trim()) {
-      for (const line of diffText.split('\n')) {
-        if (line.startsWith('+++') || line.startsWith('---')) {
-          console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.bold}${line}${ANSI.reset}`);
-        } else if (line.startsWith('+')) {
-          console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.mint}${line}${ANSI.reset}`);
-        } else if (line.startsWith('-')) {
-          console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.coral}${line}${ANSI.reset}`);
-        } else if (line.startsWith('@@')) {
-          console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}${line}${ANSI.reset}`);
-        } else {
-          console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.slate}${line}${ANSI.reset}`);
-        }
-      }
-    } else {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}Changes applied successfully.${ANSI.reset}`);
+    const rendered = DiffViewer.renderOpenCodeEdit(filePath, diffText);
+    for (const line of rendered) {
+      console.log(line);
     }
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
 
   /**
-   * Renders search match results in a cozy card.
+   * Renders search matches cleanly.
    */
   public static renderSearch(
     query: string,
@@ -497,74 +447,43 @@ export class TerminalUI {
     fileCount: number,
     samples?: string[]
   ): void {
-    const w = TerminalUI.width();
-    const title = `🔍 Search: "${query}" · ${matchesCount} matches across ${fileCount} files`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ${ANSI.sky}${title}${ANSI.darkSlate} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
-
+    console.log(`  ${c.info}🔍 Search: "${query}"${c.reset}  ${c.secondary}(${matchesCount} matches across ${fileCount} files)${c.reset}`);
     if (samples && samples.length > 0) {
-      for (const s of samples.slice(0, 8)) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}•${ANSI.reset} ${s}`);
-      }
-      if (samples.length > 8) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}... [${samples.length - 8} more matches]${ANSI.reset}`);
+      for (const s of samples.slice(0, 6)) {
+        console.log(`    ${c.secondary}•${c.reset} ${s}`);
       }
     }
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
 
-  /**
-   * Renders a dedicated agent speech card with hairlines and badges.
-   */
   public static renderAgentCard(
-    role: 'ARCHITECT' | 'CODER' | 'TESTER' | 'VERIFIER' | 'SYSTEM' | string,
+    role: string,
     modelName: string,
     message: string,
     details?: string[]
   ): void {
-    const w = TerminalUI.width();
-    const r = role.toUpperCase();
-    let badgeColor = ANSI.brightCyan;
-
-    if (r === 'CODER') badgeColor = ANSI.mint;
-    else if (r === 'TESTER') badgeColor = ANSI.gold;
-    else if (r === 'VERIFIER') badgeColor = ANSI.lavender;
-    else if (r === 'SYSTEM') badgeColor = ANSI.slate;
-    else if (r === 'ARCHITECT') badgeColor = ANSI.amber;
-
-    const title = `[${badgeColor}${r}${ANSI.reset}${ANSI.darkSlate} · ${ANSI.dim}${modelName}${ANSI.reset}${ANSI.darkSlate}]`;
-    const lineLen = Math.max(0, w - TerminalUI.stripAnsi(title).length - 6);
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ${title} ${'─'.repeat(lineLen)}╮${ANSI.reset}`);
-
+    console.log(`  ${c.accent}${role.toUpperCase()}${c.reset} ${c.secondary}(${modelName})${c.reset}:`);
     for (const line of message.split('\n')) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${line}`);
+      console.log(`    ${line}`);
     }
-
     if (details && details.length > 0) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}`);
       for (const d of details) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}• ${d}${ANSI.reset}`);
+        console.log(`    ${c.secondary}• ${d}${c.reset}`);
       }
     }
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+    console.log();
   }
 
-  /**
-   * Alias helper for logging agent speech.
-   */
   public static logAgent(role: string, message: string, details?: string[]): void {
     TerminalUI.renderAgentCard(role, 'Swarm', message, details);
   }
 
   /**
-   * Renders a verified release gate pass / rejection banner.
+   * Renders DoD verification gate pass/rejection banner.
    */
   public static renderVerdictCard(
     approved: boolean,
@@ -573,72 +492,40 @@ export class TerminalUI {
     evidenceCount: number,
     details?: string[]
   ): void {
-    const w = TerminalUI.width();
+    const c = ThemeManager.getColors();
     console.log();
     if (approved) {
-      const border = '─'.repeat(Math.max(0, w - 28));
-      console.log(`  ${ANSI.mint}╭─ [VERIFIED & RELEASED] ${border}╮${ANSI.reset}`);
-      console.log(`  ${ANSI.mint}│${ANSI.reset}  ${ANSI.mint}${ANSI.bold}✔ Definition-of-Done Satisfied with Physical Proof${ANSI.reset}`);
-      console.log(`  ${ANSI.mint}│${ANSI.reset}  ${ANSI.dim}Passed Criteria: ${criteriaCount}/${criteriaCount} | Evidence Logs: ${evidenceCount} | AST Violations: 0${ANSI.reset}`);
-      console.log(`  ${ANSI.mint}│${ANSI.reset}  ${reason}`);
-
-      if (details && details.length > 0) {
-        console.log(`  ${ANSI.mint}│${ANSI.reset}`);
-        for (const d of details) {
-          console.log(`  ${ANSI.mint}│${ANSI.reset}  ${ANSI.dim}✔ ${d}${ANSI.reset}`);
-        }
-      }
-
-      console.log(`  ${ANSI.mint}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+      console.log(`  ${c.success}${c.bold}✔ DoD Passed & Released${c.reset}  ${c.secondary}(${criteriaCount}/${criteriaCount} criteria · ${evidenceCount} proofs)${c.reset}`);
+      console.log(`  ${c.secondary}${reason}${c.reset}`);
     } else {
-      const border = '─'.repeat(Math.max(0, w - 29));
-      console.log(`  ${ANSI.coral}╭─ [VERIFICATION REJECTED] ${border}╮${ANSI.reset}`);
-      console.log(`  ${ANSI.coral}│${ANSI.reset}  ${ANSI.coral}${ANSI.bold}✖ Release Gate Blocked${ANSI.reset}`);
-      console.log(`  ${ANSI.coral}│${ANSI.reset}  ${reason}`);
+      console.log(`  ${c.error}${c.bold}✖ DoD Gate Blocked${c.reset}`);
+      console.log(`  ${c.secondary}${reason}${c.reset}`);
+    }
 
-      if (details && details.length > 0) {
-        console.log(`  ${ANSI.coral}│${ANSI.reset}`);
-        for (const d of details) {
-          console.log(`  ${ANSI.coral}│${ANSI.reset}  ${ANSI.dim}✖ ${d}${ANSI.reset}`);
-        }
+    if (details && details.length > 0) {
+      for (const d of details) {
+        const mark = approved ? `${c.success}✔${c.reset}` : `${c.error}✖${c.reset}`;
+        console.log(`    ${mark} ${c.secondary}${d}${c.reset}`);
       }
-
-      console.log(`  ${ANSI.coral}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     }
     console.log();
   }
 
   /**
-   * Renders colored unified diffs with green additions and red deletions.
+   * Renders unified diff.
    */
   public static renderDiff(diffText: string, filePath?: string): void {
-    if (!diffText.trim()) return;
-    const w = TerminalUI.width();
-    const title = filePath ? ` Git Diff: ${filePath} ` : ' Git Diff ';
-    const lineLen = Math.max(0, w - title.length - 6);
-
+    if (!diffText || !diffText.trim()) return;
+    const lines = DiffViewer.renderUnified(filePath || 'Worktree Diff', diffText);
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─${ANSI.bold}${title}${ANSI.darkSlate}${'─'.repeat(lineLen)}╮${ANSI.reset}`);
-    for (const line of diffText.split('\n')) {
-      if (line.startsWith('+++') || line.startsWith('---')) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.bold}${line}${ANSI.reset}`);
-      } else if (line.startsWith('+')) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.mint}${line}${ANSI.reset}`);
-      } else if (line.startsWith('-')) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.coral}${line}${ANSI.reset}`);
-      } else if (line.startsWith('@@')) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}${line}${ANSI.reset}`);
-      } else {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.slate}${line}${ANSI.reset}`);
-      }
+    for (const l of lines) {
+      console.log(l);
     }
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
 
   /**
-   * Terminal Markdown Renderer: parses headings, bold/italic, inline code,
-   * fenced code blocks, lists, and blockquotes with clean ANSI styling.
+   * Terminal Markdown Renderer.
    */
   public static renderMarkdown(markdown: string): void {
     const lines = markdown.split('\n');
@@ -648,28 +535,25 @@ export class TerminalUI {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
 
-      // Fenced code block toggle
       if (line.startsWith('```')) {
         if (!inCodeBlock) {
           inCodeBlock = true;
           codeLanguage = line.slice(3).trim() || 'code';
-          console.log(`  ${ANSI.darkSlate}┌── ${ANSI.dim}${codeLanguage}${ANSI.darkSlate} ${'─'.repeat(Math.max(0, 50 - codeLanguage.length))}┐${ANSI.reset}`);
+          console.log(`  ${ANSI.dim}┌── ${codeLanguage}${ANSI.reset}`);
         } else {
           inCodeBlock = false;
-          console.log(`  ${ANSI.darkSlate}└──${'─'.repeat(54)}┘${ANSI.reset}`);
+          console.log(`  ${ANSI.dim}└──${ANSI.reset}`);
         }
         continue;
       }
 
       if (inCodeBlock) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.codeHighlight}${line}${ANSI.reset}`);
+        console.log(`    ${ANSI.codeHighlight}${line}${ANSI.reset}`);
         continue;
       }
 
-      // Headings
       if (line.startsWith('# ')) {
         console.log(`\n  ${ANSI.bold}${ANSI.brightWhite}${line.slice(2)}${ANSI.reset}`);
-        console.log(`  ${ANSI.darkSlate}${'─'.repeat(Math.min(60, line.length + 8))}${ANSI.reset}`);
         continue;
       } else if (line.startsWith('## ')) {
         console.log(`\n  ${ANSI.bold}${ANSI.sky}${line.slice(3)}${ANSI.reset}`);
@@ -679,188 +563,340 @@ export class TerminalUI {
         continue;
       }
 
-      // Blockquotes
       if (line.startsWith('> ')) {
         console.log(`  ${ANSI.slate}│${ANSI.reset}  ${ANSI.italic}${line.slice(2)}${ANSI.reset}`);
         continue;
       }
 
-      // Bullet lists
       if (line.match(/^[\s]*[-*+]\s+/)) {
-        const indent = line.search(/\S/);
         const item = line.replace(/^[\s]*[-*+]\s+/, '');
-        const formatted = TerminalUI.formatInlineMarkdown(item);
-        console.log(`  ${' '.repeat(indent)}${ANSI.amber}•${ANSI.reset} ${formatted}`);
+        console.log(`  ${ANSI.amber}•${ANSI.reset} ${TerminalUI.formatInlineMarkdown(item)}`);
         continue;
       }
 
-      // Numbered lists
       if (line.match(/^[\s]*\d+\.\s+/)) {
         const match = line.match(/^[\s]*(\d+)\.\s+(.*)/);
         if (match) {
-          const formatted = TerminalUI.formatInlineMarkdown(match[2]);
-          console.log(`  ${ANSI.sky}${match[1]}.${ANSI.reset} ${formatted}`);
+          console.log(`  ${ANSI.sky}${match[1]}.${ANSI.reset} ${TerminalUI.formatInlineMarkdown(match[2])}`);
           continue;
         }
       }
 
-      // Horizontal rule
-      if (line.match(/^---+$|^\*\*\*+$/)) {
-        console.log(`  ${ANSI.darkSlate}${'─'.repeat(60)}${ANSI.reset}`);
-        continue;
-      }
-
-      // Standard prose
       console.log(`  ${TerminalUI.formatInlineMarkdown(line)}`);
     }
     console.log();
   }
 
-  /**
-   * Helper to format inline markdown tokens: `code`, **bold**, *italic*.
-   */
-  private static formatInlineMarkdown(text: string): string {
+  public static formatInlineMarkdown(text: string): string {
+    const c = ThemeManager.getColors();
     return text
-      // Inline code `...`
-      .replace(/`([^`]+)`/g, `${ANSI.bgChip}${ANSI.brightCyan} $1 ${ANSI.reset}`)
-      // Bold **...**
-      .replace(/\*\*([^*]+)\*\*/g, `${ANSI.bold}$1${ANSI.reset}`)
-      // Italic *...*
-      .replace(/\*([^*]+)\*/g, `${ANSI.italic}$1${ANSI.reset}`);
+      .replace(/`([^`]+)`/g, `${c.info || ANSI.brightCyan}$1${c.reset || ANSI.reset}`)
+      .replace(/\*\*([^*]+)\*\*/g, `${c.bold || ANSI.bold}$1${c.reset || ANSI.reset}`)
+      .replace(/\*([^*]+)\*/g, `${c.dim || ANSI.italic}$1${c.reset || ANSI.reset}`);
   }
 
   /**
-   * Renders token usage and session cost telemetry card (/cost command).
+   * Renders cost summary telemetry.
    */
   public static renderCostSummary(usage: CostTelemetry): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 30));
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ Usage & Cost Telemetry ${border}╮${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}Prompt Tokens:${ANSI.reset}     ${usage.promptTokens.toLocaleString()} tokens`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}Completion Tokens:${ANSI.reset} ${usage.completionTokens.toLocaleString()} tokens`);
-    if (usage.cachedTokens !== undefined) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}Cached Read Tokens:${ANSI.reset}${usage.cachedTokens.toLocaleString()} tokens`);
-    }
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.sky}Total Session:${ANSI.reset}     ${usage.totalTokens.toLocaleString()} tokens`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.amber}${ANSI.bold}Estimated Cost:${ANSI.reset}    $${usage.estimatedCostUsd.toFixed(4)} USD`);
+    console.log(`  ${c.bold}Session Token & Cost Telemetry${c.reset}`);
+    console.log(`  ${c.secondary}Prompt Tokens:${c.reset}     ${c.text}${usage.promptTokens.toLocaleString()}${c.reset}`);
+    console.log(`  ${c.secondary}Completion Tokens:${c.reset} ${c.text}${usage.completionTokens.toLocaleString()}${c.reset}`);
+    console.log(`  ${c.secondary}Total Tokens:${c.reset}      ${c.info}${usage.totalTokens.toLocaleString()}${c.reset}`);
+    console.log(`  ${c.accent}Estimated Cost:${c.reset}    ${c.bold}$${usage.estimatedCostUsd.toFixed(4)} USD${c.reset}`);
     if (usage.turnsCount !== undefined) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}Swarm Turns:        ${usage.turnsCount} turns executed${ANSI.reset}`);
+      console.log(`  ${c.secondary}Swarm Turns:        ${usage.turnsCount}${c.reset}`);
     }
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
 
   /**
-   * Renders the full-screen Multi-Agent Swarm Dashboard.
+   * Renders Swarm Dashboard.
    */
   public static renderSwarmDashboard(state: {
     tasks: Array<{ id: string; title: string; status: string; assignedRole: string }>;
     agents?: Record<string, any>;
     activeWorktrees?: string[];
   }): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 28));
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ ◈ SWARM ACTIVITY DASHBOARD ${border}╮${ANSI.reset}`);
+    console.log(`  ${c.accent}${c.bold}◈ SWARM ACTIVITY DASHBOARD${c.reset}  ${c.secondary}(${state.tasks.length} tasks)${c.reset}`);
+    for (const t of state.tasks) {
+      let badge = `${c.secondary}[PENDING]${c.reset}`;
+      if (t.status === 'VERIFIED') badge = `${c.success}[✔ VERIFIED]${c.reset}`;
+      else if (t.status === 'IN_PROGRESS') badge = `${c.warning}[⏳ RUNNING]${c.reset}`;
+      else if (t.status === 'CODE_SUBMITTED') badge = `${c.info}[REVIEW]${c.reset}`;
+      else if (t.status === 'REJECTED') badge = `${c.error}[✖ REJECTED]${c.reset}`;
 
-    // Tasks DAG summary
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.bold}Task Dependency DAG (${state.tasks.length} tasks):${ANSI.reset}`);
-    if (state.tasks.length === 0) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.dim}(no tasks active on Blackboard)${ANSI.reset}`);
-    } else {
-      for (const t of state.tasks) {
-        let badge = `${ANSI.slate}[PENDING]${ANSI.reset}`;
-        if (t.status === 'VERIFIED') badge = `${ANSI.mint}[✔ VERIFIED]${ANSI.reset}`;
-        else if (t.status === 'IN_PROGRESS') badge = `${ANSI.gold}[⏳ RUNNING]${ANSI.reset}`;
-        else if (t.status === 'CODE_SUBMITTED') badge = `${ANSI.sky}[REVIEW]${ANSI.reset}`;
-        else if (t.status === 'REJECTED') badge = `${ANSI.coral}[✖ REJECTED]${ANSI.reset}`;
-
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}   ${badge} ${ANSI.bold}${t.id}:${ANSI.reset} ${t.title} ${ANSI.dim}(${t.assignedRole})${ANSI.reset}`);
-      }
+      console.log(`    ${badge} ${c.bold}${t.id}:${c.reset} ${t.title} ${c.secondary}(${t.assignedRole})${c.reset}`);
     }
-
-    // Worktrees
-    if (state.activeWorktrees && state.activeWorktrees.length > 0) {
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}`);
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.bold}Active Isolated Worktrees:${ANSI.reset}`);
-      for (const wt of state.activeWorktrees) {
-        console.log(`  ${ANSI.darkSlate}│${ANSI.reset}   ${ANSI.mint}⎇${ANSI.reset} ${wt}`);
-      }
-    }
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
     console.log();
   }
 
-  /**
-   * Renders the categorized slash commands palette (/help command).
-   */
   public static renderCommandCatalog(): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 24));
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ Command Catalog ${border}╮${ANSI.reset}`);
-
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.amber}${ANSI.bold}Core Commands:${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/help${ANSI.reset}               Display this command catalog`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/cd <path>${ANSI.reset}          Switch workspace directory & git branch`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/clear${ANSI.reset}              Clear the terminal screen`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/exit${ANSI.reset}               Exit Nomin Code session`);
-
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.amber}${ANSI.bold}Swarm & Multi-Agent:${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/status${ANSI.reset}             View active Swarm Task DAG and agent statuses`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/mode <solo|team>${ANSI.reset}   Switch between SOLO (1 agent) and TEAM mode`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/team <role>=<id>${ANSI.reset}   Assign model to swarm role (e.g. coder=qwen)`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/board${ANSI.reset}              Full-screen Blackboard & acceptance criteria`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/compact${ANSI.reset}            Trigger proactive context compaction`);
-
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.amber}${ANSI.bold}Tools & Diagnostics:${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/repomap${ANSI.reset}            Generate PageRank symbol outline`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/diff${ANSI.reset}               Inspect staged worktree git diffs`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/doctor${ANSI.reset}             Run system & connectivity diagnostics`);
-
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${ANSI.amber}${ANSI.bold}Models & Rate Limits:${ANSI.reset}`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/models${ANSI.reset}             List selected models and active configuration`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/cost${ANSI.reset}               View session tokens, turns, and cost estimate`);
-    console.log(`  ${ANSI.darkSlate}│${ANSI.reset}    ${ANSI.sky}/config${ANSI.reset}             Display provider rate quotas and endpoints`);
-
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+    console.log(`  ${c.accent}${c.bold}Nomin Code Slash Commands${c.reset}`);
+    for (const cmd of SLASH_COMMANDS) {
+      console.log(`    ${c.accent}${cmd.name.padEnd(14, ' ')}${c.reset} ${c.secondary}[${cmd.category}]${c.reset} ${cmd.description}`);
+    }
     console.log();
   }
 
-  /**
-   * Renders the system doctor diagnostic health checks.
-   */
   public static renderDoctor(
     checks: Array<{ name: string; status: 'ok' | 'warn' | 'fail'; detail: string }>
   ): void {
-    const w = TerminalUI.width();
-    const border = '─'.repeat(Math.max(0, w - 24));
-
+    const c = ThemeManager.getColors();
     console.log();
-    console.log(`  ${ANSI.darkSlate}╭─ System Diagnostics ${border}╮${ANSI.reset}`);
+    console.log(`  ${c.bold}System Health & Diagnostics${c.reset}`);
+    for (const cCheck of checks) {
+      let icon = `${c.success}✔ PASS${c.reset}`;
+      if (cCheck.status === 'warn') icon = `${c.warning}⚠ WARN${c.reset}`;
+      else if (cCheck.status === 'fail') icon = `${c.error}✖ FAIL${c.reset}`;
+      console.log(`    ${icon}  ${c.bold}${cCheck.name.padEnd(20, ' ')}${c.reset} ${c.secondary}${cCheck.detail}${c.reset}`);
+    }
+    console.log();
+  }
 
-    for (const c of checks) {
-      let icon = `${ANSI.mint}✔ PASS${ANSI.reset}`;
-      if (c.status === 'warn') icon = `${ANSI.gold}⚠ WARN${ANSI.reset}`;
-      else if (c.status === 'fail') icon = `${ANSI.coral}✖ FAIL${ANSI.reset}`;
+  public static renderCommandPopup(options: {
+    query?: string;
+    selectedIndex?: number;
+    maxVisible?: number;
+    print?: boolean;
+  } = {}): { lines: string[]; filtered: SlashCommandItem[]; selected: SlashCommandItem | undefined } {
+    const c = ThemeManager.getColors();
+    const rawQ = (options.query || '').trim().toLowerCase();
+    const q = rawQ.startsWith('/') ? rawQ : (rawQ ? `/${rawQ}` : '');
+    const maxVisible = options.maxVisible ?? 8;
 
-      console.log(`  ${ANSI.darkSlate}│${ANSI.reset}  ${icon}  ${ANSI.bold}${c.name.padEnd(20, ' ')}${ANSI.reset} ${ANSI.dim}${c.detail}${ANSI.reset}`);
+    const filtered = SLASH_COMMANDS.filter((cmd) => {
+      if (!q || q === '/') return true;
+      return (
+        cmd.name.toLowerCase().startsWith(q) ||
+        cmd.name.toLowerCase().includes(q) ||
+        cmd.description.toLowerCase().includes(rawQ)
+      );
+    });
+
+    const selectedIndex = Math.max(0, Math.min(options.selectedIndex ?? 0, Math.max(0, filtered.length - 1)));
+    const selected = filtered[selectedIndex];
+
+    const lines: string[] = [];
+    const title = q && q !== '/' ? `Commands matching "${q}"` : 'Slash Commands (↑/↓ move · enter select · esc cancel)';
+    lines.push(`  ${c.bold}${title}${c.reset}`);
+
+    if (filtered.length === 0) {
+      lines.push(`    ${c.secondary}No matching commands.${c.reset}`);
+    } else {
+      const visible = filtered.slice(0, maxVisible);
+      visible.forEach((item, idx) => {
+        const isSelected = idx === selectedIndex;
+        const cursor = isSelected ? `${c.accent}❯${c.reset}` : ' ';
+        const nameColor = isSelected ? `${c.bold}${c.accent}` : `${c.info}`;
+        lines.push(`  ${cursor} ${nameColor}${item.name.padEnd(14, ' ')}${c.reset} ${c.secondary}[${item.category}]${c.reset} ${item.description}`);
+      });
     }
 
-    console.log(`  ${ANSI.darkSlate}╰${'─'.repeat(Math.max(0, w - 4))}╯${ANSI.reset}`);
+    if (options.print !== false) {
+      for (const line of lines) {
+        console.log(line);
+      }
+    }
+
+    return { lines, filtered, selected };
+  }
+
+  public static renderProviderManagerCard(options: {
+    activeProvider: ProviderEndpointConfig;
+    providers: Record<string, ProviderEndpointConfig>;
+    statusMessage?: string;
+    isError?: boolean;
+  }): void {
+    const c = ThemeManager.getColors();
+    console.log();
+    console.log(`  ${c.accent}${c.bold}LLM Provider Manager${c.reset}`);
+    console.log(`  ${c.secondary}Active Provider:${c.reset} ${c.info}${options.activeProvider.name}${c.reset} (${options.activeProvider.baseUrl})`);
+    const key = options.activeProvider.apiKey || '';
+    const masked = key ? (key.length > 8 ? `${key.slice(0, 4)}...${key.slice(-4)}` : '••••••••') : `${c.warning}(not configured)${c.reset}`;
+    console.log(`  ${c.secondary}API Key:${c.reset}         ${masked}`);
+    console.log();
+  }
+
+  public static renderModelManagerCard(options: {
+    mode: 'solo' | 'team';
+    activeModel?: string;
+    roles: Record<string, string>;
+    selectedModels: string[];
+    popularPresets: string[];
+    providerName: string;
+    reasoningEffort?: string;
+    totalCatalogCount?: number;
+    statusMessage?: string;
+  }): void {
+    const c = ThemeManager.getColors();
+    console.log();
+    console.log(`  ${c.accent}${c.bold}Model Management${c.reset}  ${c.secondary}(${options.mode.toUpperCase()})${c.reset}`);
+    if (options.mode === 'solo') {
+      console.log(`  ${c.secondary}Active Model:${c.reset} ${c.success}${options.activeModel || 'none'}${c.reset}`);
+    } else {
+      console.log(`  ${c.secondary}Roles:${c.reset}`);
+      for (const [r, m] of Object.entries(options.roles)) {
+        console.log(`    ${r}: ${c.info}${m}${c.reset}`);
+      }
+    }
+    console.log();
+  }
+
+  public static renderReasoningEffortCard(currentEffort: string = 'medium'): void {
+    const c = ThemeManager.getColors();
+    console.log();
+    console.log(`  ${c.bold}Reasoning Effort & Thinking Budget${c.reset}  ${c.secondary}[Current: ${currentEffort.toUpperCase()}]${c.reset}`);
+    console.log(`    ${c.info}off${c.reset}    — Direct output without reasoning tokens`);
+    console.log(`    ${c.info}low${c.reset}    — ~1,024 token budget`);
+    console.log(`    ${c.info}medium${c.reset} — ~2,048 token budget (default)`);
+    console.log(`    ${c.info}high${c.reset}   — ~4,096 token budget`);
+    console.log(`    ${c.info}max${c.reset}    — ~8,192 token budget`);
+    console.log();
+  }
+
+  public static renderModelDeprecatedCard(options: {
+    model: string;
+    provider: string;
+    detail?: string;
+    replacements: string[];
+  }): void {
+    const c = ThemeManager.getColors();
+    console.log();
+    console.log(`  ${c.error}${c.bold}Model Deprecated (HTTP 410 Gone):${c.reset} ${options.model} (${options.provider})`);
+    if (options.detail) console.log(`  ${c.secondary}${options.detail}${c.reset}`);
+    if (options.replacements && options.replacements.length > 0) {
+      console.log(`  ${c.secondary}Available replacements:${c.reset} ${options.replacements.join(', ')}`);
+    }
+    console.log();
+  }
+
+  public static renderModelCatalogList(options: {
+    models: Array<{ id: string; name?: string; family?: string; category?: string; contextWindow?: number; supportsReasoning?: boolean }>;
+    page: number;
+    pageSize: number;
+    totalCount: number;
+    activeModel?: string;
+    query?: string;
+  }): void {
+    const c = ThemeManager.getColors();
+    console.log();
+    const title = options.query
+      ? `Model Catalog Search: "${options.query}" (${options.totalCount} matches)`
+      : `Live Model Catalog (Page ${options.page} · ${options.totalCount} models)`;
+    console.log(`  ${c.bold}${title}${c.reset}`);
+    const startIdx = (options.page - 1) * options.pageSize;
+    const pageItems = options.models.slice(startIdx, startIdx + options.pageSize);
+    for (const m of pageItems) {
+      const isCur = m.id === options.activeModel ? ` ${c.success}[ACTIVE]${c.reset}` : '';
+      console.log(`    • ${c.info}${m.id}${c.reset}${isCur}`);
+    }
     console.log();
   }
 }
 
-/**
- * Backwards compatibility alias for TerminalUI.
- */
 export const UI = TerminalUI;
+
+/**
+ * Line-buffered real-time streaming markdown renderer for live LLM responses.
+ * Formats code fences, bold, bullet points, headers, and blockquotes with clean indentation.
+ */
+export class StreamingMarkdownRenderer {
+  private lineBuffer: string = '';
+  private inCodeBlock: boolean = false;
+  private codeLanguage: string = '';
+
+  public write(chunk: string): void {
+    this.lineBuffer += chunk;
+    const lines = this.lineBuffer.split('\n');
+    this.lineBuffer = lines.pop() || '';
+
+    for (const line of lines) {
+      this.renderLine(line);
+    }
+  }
+
+  public flush(): void {
+    if (this.lineBuffer.length > 0) {
+      this.renderLine(this.lineBuffer);
+      this.lineBuffer = '';
+    }
+    if (this.inCodeBlock) {
+      const c = ThemeManager.getColors();
+      console.log(`  ${c.secondary}└──${c.reset}\n`);
+      this.inCodeBlock = false;
+    }
+  }
+
+  private renderLine(line: string): void {
+    const c = ThemeManager.getColors();
+
+    if (line.startsWith('```')) {
+      if (!this.inCodeBlock) {
+        this.inCodeBlock = true;
+        this.codeLanguage = line.slice(3).trim() || 'code';
+        console.log(`\n  ${c.secondary}┌── ${c.bold}${c.info}${this.codeLanguage}${c.reset}`);
+      } else {
+        this.inCodeBlock = false;
+        console.log(`  ${c.secondary}└──${c.reset}\n`);
+      }
+      return;
+    }
+
+    if (this.inCodeBlock) {
+      console.log(`    ${this.colorizeCode(line)}`);
+      return;
+    }
+
+    if (line.startsWith('# ')) {
+      console.log(`\n  ${c.bold}${line.slice(2)}${c.reset}`);
+      return;
+    } else if (line.startsWith('## ')) {
+      console.log(`\n  ${c.bold}${c.accent}${line.slice(3)}${c.reset}`);
+      return;
+    } else if (line.startsWith('### ')) {
+      console.log(`\n  ${c.bold}${c.info}${line.slice(4)}${c.reset}`);
+      return;
+    }
+
+    if (line.startsWith('> ')) {
+      console.log(`  ${c.secondary}│${c.reset}  ${c.dim}${line.slice(2)}${c.reset}`);
+      return;
+    }
+
+    if (line.match(/^[\s]*[-*+]\s+/)) {
+      const item = line.replace(/^[\s]*[-*+]\s+/, '');
+      console.log(`  ${c.amber}•${c.reset} ${TerminalUI.formatInlineMarkdown(item)}`);
+      return;
+    }
+
+    if (line.match(/^[\s]*\d+\.\s+/)) {
+      const match = line.match(/^[\s]*(\d+)\.\s+(.*)/);
+      if (match) {
+        console.log(`  ${c.info}${match[1]}.${c.reset} ${TerminalUI.formatInlineMarkdown(match[2])}`);
+        return;
+      }
+    }
+
+    console.log(`  ${TerminalUI.formatInlineMarkdown(line)}`);
+  }
+
+  private colorizeCode(line: string): string {
+    const c = ThemeManager.getColors();
+    // Keywords
+    let colored = line.replace(/\b(const|let|var|function|return|import|export|from|class|async|await|if|else|for|while|try|catch|new|type|interface|def|self)\b/g, `${c.info}$1${c.reset}${c.text}`);
+    // String literals
+    colored = colored.replace(/(["'`])(.*?)\1/g, `${c.success}$1$2$1${c.reset}${c.text}`);
+    // Numbers
+    colored = colored.replace(/\b(\d+)\b/g, `${c.amber}$1${c.reset}${c.text}`);
+    // Comments
+    colored = colored.replace(/(\/\/.*$|#.*$)/g, `${c.secondary}$1${c.reset}`);
+    return `${c.text}${colored}${c.reset}`;
+  }
+}
