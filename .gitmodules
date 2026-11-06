@@ -1,0 +1,48 @@
+[submodule "research/repos/aider"]
+	path = research/repos/aider
+	url = https://github.com/Aider-AI/aider.git
+[submodule "research/repos/cline"]
+	path = research/repos/cline
+	url = https://github.com/cline/cline.git
+[submodule "research/repos/codex"]
+	path = research/repos/codex
+	url = https://github.com/openai/codex.git
+[submodule "research/repos/continue"]
+	path = research/repos/continue
+	url = https://github.com/continuedev/continue.git
+[submodule "research/repos/deepseek-harness"]
+	path = research/repos/deepseek-harness
+	url = https://github.com/deepseek-ai/deepseek-harness.git
+[submodule "research/repos/gemini-cli"]
+	path = research/repos/gemini-cli
+	url = https://github.com/google-gemini/gemini-cli.git
+[submodule "research/repos/goose"]
+	path = research/repos/goose
+	url = https://github.com/block/goose.git
+[submodule "research/repos/grok-build"]
+	path = research/repos/grok-build
+	url = https://github.com/xai-org/grok-build.git
+[submodule "research/repos/kimi-cli"]
+	path = research/repos/kimi-cli
+	url = https://github.com/MoonshotAI/kimi-cli.git
+[submodule "research/repos/kimi-code"]
+	path = research/repos/kimi-code
+	url = https://github.com/MoonshotAI/kimi-code.git
+[submodule "research/repos/opencode"]
+	path = research/repos/opencode
+	url = https://github.com/anomalyco/opencode.git
+[submodule "research/repos/openhands"]
+	path = research/repos/openhands
+	url = https://github.com/All-Hands-AI/OpenHands.git
+[submodule "research/repos/qwen-code"]
+	path = research/repos/qwen-code
+	url = https://github.com/QwenLM/qwen-code.git
+[submodule "research/repos/software-agent-sdk"]
+	path = research/repos/software-agent-sdk
+	url = https://github.com/OpenHands/software-agent-sdk.git
+[submodule "research/repos/swe-agent"]
+	path = research/repos/swe-agent
+	url = https://github.com/SWE-agent/SWE-agent.git
+[submodule "research/repos/ZCode"]
+	path = research/repos/ZCode
+	url = https://github.com/zai-org/ZCode.git
