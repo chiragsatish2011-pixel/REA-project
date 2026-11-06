@@ -1,0 +1,27 @@
+feature,area,priority,original,clone,notes
+Interactive Terminal REPL with raw keystroke input,repl,must,yes,yes,Clean prompt with multiline paste support and instant arrow navigation
+Slash command menu with live fuzzy overlay,repl,must,yes,yes,Instant overlay on slash with instant character filtering
+Tool execution loop for bash commands,execution,must,yes,yes,Child process runner with output capture and timeout guards
+File reading and semantic repomap discovery,tools,must,yes,yes,AST symbol extraction and PageRank repomap
+Unified diff renderer with syntax highlighting,tools,must,yes,yes,Hunk-aware git diff preview with colored additions and deletions
+Search and replace file modification engine,tools,must,yes,yes,Safe atomic file patching with backup rollback
+4-tier security permission gate for dangerous commands,security,must,yes,yes,Interactive prompt for bash commands and file deletions
+Interactive model switcher with arrow-key navigation,model,must,yes,yes,Virtualized model selector supporting 120+ models
+Session history recording and export,context,must,yes,yes,Exports structured session transcripts to JSONL and markdown
+Git checkpointing and atomic turn rewind,context,must,yes,yes,Automatic git micro-commits with one-click undo rollback
+Proactive context compaction engine,context,must,yes,yes,Compacts context at 80 percent threshold preserving critical diffs
+Doctor environment diagnostics command,diagnostics,must,yes,yes,Preflight checks for Node git filesystem permissions and endpoints
+Workspace guidelines and memory system,memory,must,yes,yes,Persistent GUIDELINES.md file loaded on every session
+Provider credential vault with AES-256 encryption,security,must,yes,yes,Encrypted local keychain with key masking and anti-exfiltration
+Reasoning effort slider and thinking budget cycler,model,should,yes,yes,Inline Left Right arrow cycler for thinking tokens
+Live model catalog discovery with endpoint probing,model,should,yes,yes,Dynamic capability probing for tool fidelity and TTFT
+Real-time session token and financial cost telemetry,telemetry,should,yes,yes,Live token usage tracking and cache efficiency calculation
+Aurora theme design system with AA and AAA contrast,ui,should,yes,yes,Polar night dark mode with electric cyan and aurora emerald accents
+Theme switcher command with multiple colorways,ui,should,yes,yes,Supports aurora dark light high-contrast and colorblind palettes
+Stable prefix alignment for prompt cache optimization,performance,should,yes,yes,Deterministic SHA-256 prompt hashing for cache reuse
+Rate limiter scheduler with exponential backoff and AIMD,performance,should,yes,yes,Adaptive concurrency limiter preventing 429 rate limit drops
+Lifecycle hooks engine for pre and post tool triggers,extensibility,should,yes,yes,Configurable shell hooks on tool execution and session boundaries
+Multi-agent swarm teams coordinator,swarm,could,yes,yes,5-agent swarm architecture with Architect Coder Tester and Verifier
+Isolated git worktrees for parallel agent branches,swarm,could,yes,yes,Independent worktree isolation for concurrent coding agents
+Shared Blackboard state with Definition of Done verification,swarm,could,yes,yes,Fresh-context verifier gate ensuring AST clean code before release
+Anthropic proprietary server weight hosting,infrastructure,could,yes,skip,Clean room architecture connects to standard official provider APIs
